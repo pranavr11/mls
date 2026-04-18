@@ -12,7 +12,7 @@ python scripts/run_all.py \
   --results-root results \
   --cache-dir .cache \
   --models EleutherAI/pythia-160m gpt2 \
-  --datasets pg19 scrolls \
+  --datasets scrolls \
   --scrolls-task gov_report \
   --seeds 13 37 73 \
   --epochs 1 \
