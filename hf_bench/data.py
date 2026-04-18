@@ -17,7 +17,7 @@ def _scrolls_text(example: Dict) -> str:
 def load_raw_dataset(dataset_name: str, scrolls_task: str, cache_dir: str) -> DatasetDict:
     if dataset_name == "pg19":
         try:
-            ds = load_dataset("pg19", cache_dir=cache_dir)
+            ds = load_dataset("pg19", cache_dir=cache_dir, trust_remote_code=True)
         except RuntimeError as e:
             # HF datasets>=4 dropped script-based loading; PG-19 still uses a script.
             if "Dataset scripts are no longer supported" in str(e):
