@@ -1,0 +1,11 @@
+name: hf-bench-15442
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch>=2.2
+  - pip
+  - pip:
+      - -r requirements.txt
