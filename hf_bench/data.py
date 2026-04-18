@@ -16,7 +16,16 @@ def _scrolls_text(example: Dict) -> str:
 
 def load_raw_dataset(dataset_name: str, scrolls_task: str, cache_dir: str) -> DatasetDict:
     if dataset_name == "pg19":
-        ds = load_dataset("pg19", cache_dir=cache_dir)
+        try:
+            ds = load_dataset("pg19", cache_dir=cache_dir)
+        except RuntimeError as e:
+            # HF datasets>=4 dropped script-based loading; PG-19 still uses a script.
+            if "Dataset scripts are no longer supported" in str(e):
+                raise RuntimeError(
+                    "PG-19 requires huggingface `datasets<4`. "
+                    "Please run: pip install 'datasets>=2.18,<4'"
+                ) from e
+            raise
         if "validation" not in ds and "train" in ds:
             split = ds["train"].train_test_split(test_size=0.01, seed=42)
             ds = DatasetDict(train=split["train"], validation=split["test"])
