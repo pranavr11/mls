@@ -1,0 +1,70 @@
+model:
+  model_name: EleutherAI/pythia-160m
+  tokenizer_name:
+  cache_dir: artifacts/hf_cache
+  trust_remote_code: false
+  torch_dtype: bfloat16
+  attn_implementation: eager
+  gradient_checkpointing: true
+  compile_model: false
+
+attention:
+  attention_type: full
+  window_size: 512
+  allow_hfold_fallback: false
+  hfold_backend:
+  hfold:
+    heap_size: 64
+    top_q: 8
+    pop_e: 8
+    fold_hidden_size:
+    notes: Available when attention_type is switched to hfold.
+
+data:
+  dataset_name: emozilla/pg19
+  dataset_config_name:
+  train_split: train
+  validation_split: validation
+  test_split: test
+  text_column: text
+  preprocessing_num_workers: 4
+  block_size: 1024
+  processed_dataset_dir: artifacts/processed/pg19_block1024
+  overwrite_cache: false
+  max_train_samples:
+  max_validation_samples:
+  max_test_samples:
+
+training:
+  output_dir: artifacts/runs/full
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 16
+  num_train_epochs: 1.0
+  max_steps: -1
+  learning_rate: 5.0e-5
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-8
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  log_interval: 10
+  eval_interval: 200
+  save_interval: 200
+  max_checkpoints: 3
+  resume_from_checkpoint:
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 2
+  pin_memory: true
+
+runtime:
+  seed: 42
+  device: auto
+
+benchmark:
+  sequence_lengths: [512, 1024, 2048]
+  max_eval_batches: 100
+  profile_memory: true
+  profile_throughput: true

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfold-pipeline"
+version = "0.1.0"
+description = "Config-driven PG-19 fine-tuning and benchmarking pipeline for pluggable Pythia-160M attention variants."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Krish Mody Lab Pipeline Scaffold" }
+]
+dependencies = [
+  "torch>=2.2",
+  "transformers>=4.46",
+  "datasets>=2.21",
+  "pyyaml>=6.0",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+hfold-prepare-pg19 = "hfold_pipeline.scripts.prepare_pg19:main"
+hfold-train = "hfold_pipeline.scripts.train:main"
+hfold-eval = "hfold_pipeline.scripts.evaluate:main"
+hfold-benchmark = "hfold_pipeline.scripts.benchmark:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
