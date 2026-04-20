@@ -1,5 +1,5 @@
 datasets==2.18.0
-transformers
+transformers>=4.36,<4.45
 torch
 evaluate
 tqdm
