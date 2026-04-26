@@ -52,7 +52,7 @@ def build_gpt2_with_hfold(
     runtime = HFoldRuntime(config)
     embedding_model = EmbeddingAutoencoder(
         hidden_size=config.model.adapter_dim,
-        latent_size=config.model.adapter_dim,
+        latent_size=int(config.model.embedding_latent_dim),
         max_slots=config.model.max_heap_size,
     )
     relevancy_model = RelevancyTransformer(hidden_size=config.model.adapter_dim)

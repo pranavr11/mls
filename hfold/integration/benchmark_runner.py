@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -23,34 +21,21 @@ class BenchmarkResult:
     tokens_per_second: float
 
 
-def _agent_debug_log(*, hypothesis_id: str, message: str, data: dict) -> None:
-    payload = {
-        "sessionId": "d87f41",
-        "runId": "findings-followup",
-        "hypothesisId": hypothesis_id,
-        "location": "hfold/integration/benchmark_runner.py:_run_eval",
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        log_path = "/Users/adityadewan/Documents/PROFESSIONAL./UNIVERSITY./CARNEGIE MELLON UNIVERSITY./YEAR TWO./SEMESTER TWO./15-442 - MACHINE LEARNING SYSTEMS./MLSFINAL/.cursor/debug-d87f41.log"
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, default=str) + "\n")
-    except OSError:
-        pass
-
-
 @torch.no_grad()
-def _run_eval(model: torch.nn.Module, dataloader, device: torch.device) -> tuple[float, float]:
+def _run_eval(
+    model: torch.nn.Module,
+    dataloader,
+    device: torch.device,
+    *,
+    hfold_window_size: int | None = None,
+) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
     total_tokens = 0
     total_batches = 0
     start = time.perf_counter()
     runtime = getattr(model, "hfold_runtime", None)
-    for batch_idx, batch in enumerate(dataloader):
+    for batch in dataloader:
         # Each evaluation example is an independent sequence; HFold heap state
         # must not leak across unrelated batches/sequences.
         if runtime is not None:
@@ -70,8 +55,11 @@ def _run_eval(model: torch.nn.Module, dataloader, device: torch.device) -> tuple
                 row_mask = None if attention_mask is None else attention_mask[row : row + 1]
                 seq_len = int(row_ids.size(1))
                 for t in range(1, seq_len):
-                    prefix_ids = row_ids[:, :t]
-                    prefix_mask = None if row_mask is None else row_mask[:, :t]
+                    start_idx = 0
+                    if hfold_window_size is not None and hfold_window_size > 0:
+                        start_idx = max(0, t - int(hfold_window_size))
+                    prefix_ids = row_ids[:, start_idx:t]
+                    prefix_mask = None if row_mask is None else row_mask[:, start_idx:t]
                     out = model(
                         input_ids=prefix_ids,
                         attention_mask=prefix_mask,
@@ -86,41 +74,12 @@ def _run_eval(model: torch.nn.Module, dataloader, device: torch.device) -> tuple
                     token_nll = F.cross_entropy(logits, target, reduction="sum")
                     batch_nll += float(token_nll.item())
                     batch_pred_tokens += 1
-                # region agent log
-                layer0 = runtime.state.layers.get(0)
-                _agent_debug_log(
-                    hypothesis_id="H1",
-                    message="benchmark sequence autoregressive snapshot",
-                    data={
-                        "batch_idx": int(batch_idx),
-                        "row_idx": int(row),
-                        "seq_len": seq_len,
-                        "predicted_tokens": int(max(seq_len - 1, 0)),
-                        "layer0_call_count": (0 if layer0 is None else int(layer0.call_count)),
-                        "runtime_timestep": int(runtime.state.timestep),
-                    },
-                )
-                # endregion
             if batch_pred_tokens > 0:
                 total_loss += batch_nll / batch_pred_tokens
                 total_batches += 1
                 total_tokens += int(batch_pred_tokens)
         else:
             output = model(**batch)
-            # region agent log
-            if runtime is not None:
-                layer0 = runtime.state.layers.get(0)
-                _agent_debug_log(
-                    hypothesis_id="H1",
-                    message="benchmark batch call-count snapshot",
-                    data={
-                        "batch_idx": int(batch_idx),
-                        "seq_len": int(batch["input_ids"].shape[-1]),
-                        "layer0_call_count": (0 if layer0 is None else int(layer0.call_count)),
-                        "runtime_timestep": int(runtime.state.timestep),
-                    },
-                )
-            # endregion
             total_loss += float(output.loss.item())
             total_batches += 1
             total_tokens += int(batch["input_ids"].numel())
@@ -242,7 +201,12 @@ def benchmark_three_modes(
     results.append(_to_result("sliding_window", sliding_loss, sliding_tok_s))
 
     hfold_model = _build_hfold().to(device_obj)
-    hfold_loss, hfold_tok_s = _run_eval(hfold_model, dataloader, device_obj)
+    hfold_loss, hfold_tok_s = _run_eval(
+        hfold_model,
+        dataloader,
+        device_obj,
+        hfold_window_size=sliding_window_size,
+    )
     results.append(_to_result("hfold", hfold_loss, hfold_tok_s))
 
     return results

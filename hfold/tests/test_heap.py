@@ -25,10 +25,12 @@ def test_bounded_heap_retains_highest_scores():
     assert [entry.score for entry in evicted] == [0.1]
 
 
-def test_pop_top_k_is_deterministic():
+def test_pop_top_k_tie_breaks_by_entry_id():
     heap = BoundedMaxHeap(capacity=5)
     heap.push_many([_entry(0.8, 1), _entry(0.8, 0), _entry(0.4, 3)])
     popped = heap.pop_top_k(2)
+    # Deterministic contract for this heap implementation: ties are broken by
+    # ascending entry id.
     assert [(entry.score, entry.id) for entry in popped] == [(0.8, 0), (0.8, 1)]
     remaining = heap.peek_all()
     assert len(remaining) == 1

@@ -11,7 +11,7 @@ class HFoldModelConfig:
     top_w: int = 8
     pop_k: int = 8
     adapter_dim: int = 256
-    per_layer_heap: bool = True
+    embedding_latent_dim: int | None = None
 
     def validate(self) -> None:
         if self.hidden_size <= 0:
@@ -33,6 +33,13 @@ class HFoldModelConfig:
             self.top_w = 0
         if self.adapter_dim <= 0:
             raise ValueError("adapter_dim must be positive.")
+        # Auto-resolve a true bottleneck by default.
+        if self.embedding_latent_dim is None:
+            self.embedding_latent_dim = max(1, self.adapter_dim // 2)
+        if self.embedding_latent_dim <= 0:
+            raise ValueError("embedding_latent_dim must be positive.")
+        if self.adapter_dim > 1 and self.embedding_latent_dim >= self.adapter_dim:
+            raise ValueError("embedding_latent_dim must be < adapter_dim for a true bottleneck.")
 
 
 @dataclass

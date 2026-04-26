@@ -16,10 +16,7 @@ from __future__ import annotations
 from types import MethodType
 from typing import Any
 
-import json
-import os
 import torch
-import time
 
 from ..models.interfaces import EmbeddingModelProtocol, RelevancyModelProtocol
 from .hfold_runtime import HFoldRuntime
@@ -27,25 +24,6 @@ from .vector_store import append_heap_vectors, split_appended_outputs
 
 
 GLOBAL_HEAP_INDEX = 0
-
-
-def _agent_debug_log(*, hypothesis_id: str, message: str, data: dict) -> None:
-    payload = {
-        "sessionId": "d87f41",
-        "runId": "findings-followup",
-        "hypothesisId": hypothesis_id,
-        "location": "hfold/inference/model_hook.py:_select_top_candidates",
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        log_path = "/Users/adityadewan/Documents/PROFESSIONAL./UNIVERSITY./CARNEGIE MELLON UNIVERSITY./YEAR TWO./SEMESTER TWO./15-442 - MACHINE LEARNING SYSTEMS./MLSFINAL/.cursor/debug-d87f41.log"
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, default=str) + "\n")
-    except OSError:
-        pass
 
 
 def _expand_attention_mask_for_prepend(
@@ -74,6 +52,67 @@ def _expand_attention_mask_for_prepend(
     return attention_mask
 
 
+def _past_kv_length(past_kv: Any) -> int:
+    """Return the seq-length already cached in `past_kv`, supporting both the
+    legacy tuple-of-tuples format and HF DynamicCache-like objects.
+    """
+    if past_kv is None:
+        return 0
+    if isinstance(past_kv, (tuple, list)) and past_kv:
+        layer0 = past_kv[0]
+        if isinstance(layer0, (tuple, list)) and layer0 and hasattr(layer0[0], "size"):
+            return int(layer0[0].size(-2))
+    if hasattr(past_kv, "get_seq_length"):
+        try:
+            return int(past_kv.get_seq_length())
+        except Exception:
+            return 0
+    return 0
+
+
+def _splice_heap_from_past_kv(past_kv: Any, *, n_before: int, heap_len: int) -> Any:
+    """Remove the `heap_len` slots that were inserted at index `n_before` from
+    every layer's K/V cache. Heap tokens are appended to the inputs at this
+    timestep but must NOT be retained in the cache for future steps.
+    """
+    if past_kv is None or heap_len <= 0:
+        return past_kv
+    if isinstance(past_kv, (tuple, list)):
+        spliced: list[Any] = []
+        for layer in past_kv:
+            if (
+                isinstance(layer, (tuple, list))
+                and len(layer) >= 2
+                and hasattr(layer[0], "size")
+                and hasattr(layer[1], "size")
+            ):
+                k_t, v_t = layer[0], layer[1]
+                new_k = torch.cat([k_t[..., :n_before, :], k_t[..., n_before + heap_len :, :]], dim=-2)
+                new_v = torch.cat([v_t[..., :n_before, :], v_t[..., n_before + heap_len :, :]], dim=-2)
+                spliced.append((new_k, new_v))
+            else:
+                spliced.append(layer)
+        return tuple(spliced)
+    if hasattr(past_kv, "key_cache") and hasattr(past_kv, "value_cache"):
+        for i in range(len(past_kv.key_cache)):
+            k_t = past_kv.key_cache[i]
+            v_t = past_kv.value_cache[i]
+            if k_t is None or v_t is None:
+                continue
+            past_kv.key_cache[i] = torch.cat(
+                [k_t[..., :n_before, :], k_t[..., n_before + heap_len :, :]], dim=-2
+            )
+            past_kv.value_cache[i] = torch.cat(
+                [v_t[..., :n_before, :], v_t[..., n_before + heap_len :, :]], dim=-2
+            )
+        if hasattr(past_kv, "_seen_tokens"):
+            try:
+                past_kv._seen_tokens = max(0, int(past_kv._seen_tokens) - heap_len)
+            except Exception:
+                pass
+    return past_kv
+
+
 def _select_top_candidates(
     attn_weights: torch.Tensor,
     token_vectors: torch.Tensor,
@@ -83,28 +122,6 @@ def _select_top_candidates(
     # over heads. This matches autoregressive timestep semantics: select
     # candidates relevant to the token being predicted now.
     score_per_key = attn_weights.mean(dim=1)[:, -1, :]
-    # region agent log
-    try:
-        last_query_scores = attn_weights[:, :, -1, :].mean(dim=1)
-        legacy_global_scores = attn_weights.mean(dim=1).mean(dim=1)
-        legacy_global_idx = torch.topk(legacy_global_scores[:, : token_vectors.size(1)], k=min(top_w, legacy_global_scores.size(-1), token_vectors.size(1)), dim=-1).indices
-        selected_idx = torch.topk(score_per_key[:, : token_vectors.size(1)], k=min(top_w, score_per_key.size(-1), token_vectors.size(1)), dim=-1).indices
-        last_idx = torch.topk(last_query_scores[:, : token_vectors.size(1)], k=min(top_w, last_query_scores.size(-1), token_vectors.size(1)), dim=-1).indices
-        _agent_debug_log(
-            hypothesis_id="H3",
-            message="top-w semantics legacy-global-vs-last-query comparison",
-            data={
-                "k": int(selected_idx.size(-1)),
-                "selected_idx": selected_idx[0].tolist() if selected_idx.size(0) > 0 else [],
-                "legacy_global_idx": legacy_global_idx[0].tolist() if legacy_global_idx.size(0) > 0 else [],
-                "last_query_idx": last_idx[0].tolist() if last_idx.size(0) > 0 else [],
-                "selected_matches_last_query": bool(torch.equal(selected_idx, last_idx)),
-                "legacy_matches_last_query": bool(torch.equal(legacy_global_idx, last_idx)),
-            },
-        )
-    except Exception:
-        pass
-    # endregion
     k = min(top_w, score_per_key.size(-1), token_vectors.size(1))
     scores, indices = torch.topk(score_per_key[:, : token_vectors.size(1)], k=k, dim=-1)
     gather_index = indices.unsqueeze(-1).expand(-1, -1, token_vectors.size(-1))
@@ -170,23 +187,24 @@ class HFoldModelHook:
         kwargs.setdefault("return_dict", True)
         caller_requested_attn = bool(kwargs.get("output_attentions", False))
         cache_keys = ("past_key_values", "past_key_value", "layer_past", "cache")
-        has_cache_context = bool(kwargs.get("use_cache", False)) or any(
-            (key in kwargs and kwargs.get(key) is not None) for key in cache_keys
-        )
+        prior_past_kv: Any = None
+        for cache_key in cache_keys:
+            value = kwargs.get(cache_key)
+            if value is not None:
+                prior_past_kv = value
+                break
 
-        # HFold heap injection is incompatible with naive KV caching: the heap
-        # rows do not correspond to past tokens, so we cannot safely splice
-        # them into a HuggingFace-style past cache. We therefore always run a
-        # single, no-cache augmented forward. position_ids is dropped so the
-        # backbone derives positions from sequence length on its own.
+        # KV cache and sliding window run as the model normally would. The
+        # heap tokens are an extra (k) inputs prepended for THIS timestep only;
+        # they must not be retained in the past_key_values cache for future
+        # steps (we splice them out post-forward). position_ids is dropped so
+        # the backbone re-derives positions from `past_kv length + current
+        # input length` after we add the heap rows.
         def _build_unified_kwargs() -> dict[str, Any]:
             unified = dict(kwargs)
             unified["output_attentions"] = True
             unified["return_dict"] = True
-            unified["use_cache"] = False
             unified.pop("position_ids", None)
-            for cache_key in cache_keys:
-                unified.pop(cache_key, None)
             return unified
 
         layer_state = self.runtime._get_layer_state(GLOBAL_HEAP_INDEX)
@@ -254,6 +272,24 @@ class HFoldModelHook:
         )
         outputs_for_heap = outputs
         outputs_to_return = outputs
+
+        # Remove heap-token slots from any returned KV cache so future steps
+        # only see real-sequence cache entries. Heap was prepended at offset
+        # `n_before` (existing cache length) of the new K/V dims.
+        if heap_len > 0:
+            new_past_kv = getattr(outputs, "past_key_values", None)
+            if new_past_kv is None:
+                new_past_kv = getattr(outputs, "past_key_value", None)
+            if new_past_kv is not None:
+                n_before = _past_kv_length(prior_past_kv)
+                spliced = _splice_heap_from_past_kv(
+                    new_past_kv, n_before=n_before, heap_len=heap_len
+                )
+                try:
+                    outputs_to_return.past_key_values = spliced
+                except (AttributeError, TypeError):
+                    pass
+
         last_hidden = self._extract_last_hidden(outputs_for_heap)
         last_attn = self._last_attention(outputs_for_heap)
         token_output, transformed_heap = split_appended_outputs(last_hidden, seq_len)

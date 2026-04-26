@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import json
-import os
 import torch
-import time
 
 from ..config.schema import HFoldConfig
 from ..models.adapters import BackboneAdapterRegistry
@@ -33,24 +30,6 @@ class HFoldRuntime:
         self._heaps: dict[int, BoundedMaxHeap] = {}
         self._adapters: BackboneAdapterRegistry | None = None
         self._backbone: str | None = None
-
-    def _agent_debug_log(self, *, hypothesis_id: str, message: str, data: dict) -> None:
-        payload = {
-            "sessionId": "d87f41",
-            "runId": "findings-followup",
-            "hypothesisId": hypothesis_id,
-            "location": "hfold/inference/hfold_runtime.py:HFoldRuntime.step_with_reinsert_and_fold",
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        try:
-            log_path = "/Users/adityadewan/Documents/PROFESSIONAL./UNIVERSITY./CARNEGIE MELLON UNIVERSITY./YEAR TWO./SEMESTER TWO./15-442 - MACHINE LEARNING SYSTEMS./MLSFINAL/.cursor/debug-d87f41.log"
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, default=str) + "\n")
-        except OSError:
-            pass
 
     def reset(self) -> None:
         self.state = HFoldRuntimeState()
@@ -214,21 +193,14 @@ class HFoldRuntime:
                 evicted_tensor = raw_evicted[:, :target_slots, :]
             padding_mask = torch.zeros(1, target_slots, dtype=torch.bool, device=evicted_tensor.device)
             padding_mask[:, : min(slot_count, target_slots)] = True
-            # region agent log
-            self._agent_debug_log(
-                hypothesis_id="H2",
-                message="evicted-slot-count before embedding summary",
-                data={
-                    "evicted_count": int(slot_count),
-                    "max_heap_size": int(self.config.model.max_heap_size),
-                    "uses_full_slots": bool(slot_count == self.config.model.max_heap_size),
-                    "summary_slots": int(evicted_tensor.size(1)),
-                },
-            )
-            # endregion
             evicted_latent = self._encode_for_aux_models(evicted_tensor)
             summary = embedding_model.encode_summary(evicted_latent, padding_mask=padding_mask)
-            self._fold_current_heap(layer_index=layer_index, summary=summary, relevancy_model=relevancy_model)
+            self._fold_current_heap(
+                layer_index=layer_index,
+                summary=summary,
+                embedding_model=embedding_model,
+                relevancy_model=relevancy_model,
+            )
 
         layer_state.heap = heap.peek_all()
         self.state.timestep = max(self.state.timestep, time_index)
@@ -243,6 +215,7 @@ class HFoldRuntime:
         *,
         layer_index: int,
         summary: torch.Tensor,
+        embedding_model: EmbeddingModelProtocol,
         relevancy_model: RelevancyModelProtocol,
     ) -> None:
         layer_state = self._get_layer_state(layer_index)
@@ -251,23 +224,19 @@ class HFoldRuntime:
             return
         heap_vectors_raw = torch.stack([entry.vector for entry in heap_entries], dim=0).unsqueeze(0)
         heap_vectors_latent = self._encode_for_aux_models(heap_vectors_raw)
-        relevancy_scores = relevancy_model.score_heap(summary, heap_vectors_latent)
+        # Relevancy model scores in adapter space. Decode one slot from the
+        # bottleneck summary to recover adapter-space summary features.
+        if hasattr(embedding_model, "decode_from_summary"):
+            summary_for_relevancy = embedding_model.decode_from_summary(summary, num_slots=1).squeeze(1)
+        else:
+            # Backward-compatible fallback for minimal test doubles.
+            summary_for_relevancy = summary
+        relevancy_scores = relevancy_model.score_heap(summary_for_relevancy, heap_vectors_latent)
         # Spec-aligned fold in backbone space: h_i <- h_i + r_i * g_raw.
         # We keep relevancy scoring in latent space but decode the summary
         # once and apply the additive update on raw backbone vectors.
-        summary_raw = self._decode_from_aux_models(summary.unsqueeze(1)).squeeze(1)
+        summary_raw = self._decode_from_aux_models(summary_for_relevancy.unsqueeze(1)).squeeze(1)
         updated_raw = heap_vectors_raw + relevancy_scores.unsqueeze(-1) * summary_raw.unsqueeze(1)
-        # region agent log
-        self._agent_debug_log(
-            hypothesis_id="H4",
-            message="fold-space formula path",
-            data={
-                "fold_space": "raw_backbone",
-                "summary_latent_dim": int(summary.size(-1)),
-                "summary_raw_dim": int(summary_raw.size(-1)),
-            },
-        )
-        # endregion
         for idx, entry in enumerate(heap_entries):
             entry.vector = updated_raw[0, idx].detach().clone()
         # Rebuild heap with updated entries while preserving scores and ids.

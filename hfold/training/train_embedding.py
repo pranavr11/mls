@@ -43,7 +43,7 @@ def train_embedding_model(
     adapters = BackboneAdapterRegistry(specs=backbone_dims, shared_dim=config.model.adapter_dim).to(device)
     model = EmbeddingAutoencoder(
         hidden_size=config.model.adapter_dim,
-        latent_size=config.model.adapter_dim,
+        latent_size=int(config.model.embedding_latent_dim),
         max_slots=config.model.max_heap_size,
     ).to(device)
     optimizer = torch.optim.AdamW(

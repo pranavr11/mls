@@ -184,10 +184,10 @@ def test_global_hook_drops_position_ids_for_augmented_aux_pass():
     assert trunk.last_seen_position_ids_shape is None
 
 
-def test_global_hook_forces_use_cache_false_and_strips_past_key_values():
-    """HFold heap injection is incompatible with naive KV caching. Verify the
-    hook always presents a single no-cache forward to the trunk, even when the
-    caller asks for cached decoding.
+def test_global_hook_passes_use_cache_and_past_kv_through_to_trunk():
+    """HFold must integrate with the model's normal sliding-window KV cache.
+    The hook must NOT force `use_cache=False` and must NOT drop the caller's
+    `past_key_values`.
     """
     torch.manual_seed(0)
     hidden_size = 8
@@ -220,8 +220,104 @@ def test_global_hook_forces_use_cache_false_and_strips_past_key_values():
     )
 
     trunk = model.gpt_neox
-    assert trunk.last_seen_use_cache is False, "hook must force use_cache=False on the trunk"
-    assert trunk.last_seen_past_key_values_present is False, "hook must strip past_key_values from the trunk call"
+    assert trunk.last_seen_use_cache is True, "hook must NOT force use_cache=False"
+    assert trunk.last_seen_past_key_values_present is True, "hook must NOT strip past_key_values"
+
+
+def test_global_hook_splices_heap_tokens_from_returned_past_kv():
+    """After the augmented forward, the hook must remove the prepended heap
+    rows from `past_key_values` so future steps never see heap entries in the
+    cache.
+    """
+    torch.manual_seed(0)
+    hidden_size = 8
+    K = 2
+    n_past = 4
+    n_new = 1
+
+    class _CacheTrunkOutput:
+        def __init__(self, last_hidden_state, attentions, past_key_values):
+            self.last_hidden_state = last_hidden_state
+            self.attentions = attentions
+            self.past_key_values = past_key_values
+
+    class _CacheTrunk(nn.Module):
+        def __init__(self, hidden: int) -> None:
+            super().__init__()
+            self.embed_in = nn.Embedding(32, hidden)
+            self.last_returned_pkv_lengths: list[int] | None = None
+
+        def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            inputs_embeds=None,
+            output_attentions=False,
+            return_dict=True,
+            **kw,
+        ):
+            del attention_mask, return_dict
+            h = inputs_embeds if inputs_embeds is not None else self.embed_in(input_ids)
+            b, s, hidden = h.shape
+            attns = (torch.softmax(torch.zeros(b, 1, s, s), dim=-1),) if output_attentions else tuple()
+            prior = kw.get("past_key_values")
+            prior_len = 0
+            if prior is not None:
+                prior_len = int(prior[0][0].size(-2))
+            new_kv_len = prior_len + s
+            new_pkv = (
+                (
+                    torch.zeros(b, 1, new_kv_len, hidden),
+                    torch.zeros(b, 1, new_kv_len, hidden),
+                ),
+            )
+            return _CacheTrunkOutput(
+                last_hidden_state=h, attentions=attns, past_key_values=new_pkv
+            )
+
+    class _CacheModel(nn.Module):
+        def __init__(self, hidden: int) -> None:
+            super().__init__()
+            self.gpt_neox = _CacheTrunk(hidden)
+
+    config = HFoldConfig(
+        model=HFoldModelConfig(
+            hidden_size=hidden_size,
+            num_heads=2,
+            max_heap_size=K,
+            top_w=K,
+            pop_k=K,
+            adapter_dim=8,
+        )
+    )
+    runtime = HFoldRuntime(config)
+    runtime.attach_adapters(
+        BackboneAdapterRegistry(specs={"pythia": hidden_size}, shared_dim=8),
+        "pythia",
+    )
+    model = _CacheModel(hidden_size)
+    embed = EmbeddingAutoencoder(hidden_size=8, latent_size=8, max_slots=K)
+    rel = RelevancyTransformer(hidden_size=8, num_layers=1, num_heads=2)
+    wrap_pythia_with_hfold(model, runtime, embed, rel)
+
+    # Timestep 0: prime the heap. No cache yet.
+    out0 = model.gpt_neox(input_ids=torch.randint(0, 16, (1, n_past)), use_cache=True)
+    pkv0 = out0.past_key_values
+    assert pkv0[0][0].size(-2) == n_past
+
+    # Timestep 1: caller passes existing cache (len n_past) + 1 new token. The
+    # hook will prepend K heap tokens to the inputs. After the trunk returns
+    # a cache of length n_past + K + n_new, the hook must splice it back to
+    # n_past + n_new.
+    out1 = model.gpt_neox(
+        input_ids=torch.randint(0, 16, (1, n_new)),
+        use_cache=True,
+        past_key_values=pkv0,
+    )
+    cached_len_after = int(out1.past_key_values[0][0].size(-2))
+    assert cached_len_after == n_past + n_new, (
+        f"expected cache length {n_past + n_new} after splicing heap; got {cached_len_after}"
+    )
 
 
 def test_run_eval_resets_hfold_runtime_between_batches():
@@ -260,6 +356,116 @@ def test_run_eval_resets_hfold_runtime_between_batches():
     _run_eval(model, dataloader, torch.device("cpu"))
 
     assert model.observed_call_counts == [0, 0, 0]
+
+
+class _StubRuntime:
+    """Minimal hfold_runtime stand-in with the .reset() contract."""
+
+    def __init__(self) -> None:
+        self.reset_calls = 0
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+class _PrefixRecorderModel(nn.Module):
+    """Records prefix lengths for each forward call so we can verify the
+    bounded-window HFold eval path under controlled conditions.
+    """
+
+    def __init__(self, vocab: int = 32) -> None:
+        super().__init__()
+        self.vocab = vocab
+        self.hfold_runtime = _StubRuntime()
+        self.seen_prefix_lens: list[int] = []
+        self.tokens_processed = 0
+        self.call_count_observed: list[int] = []
+        self._call_index = 0
+
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        del attention_mask, labels
+        n = int(input_ids.size(1))
+        self.seen_prefix_lens.append(n)
+        self.tokens_processed += n
+        self.call_count_observed.append(self._call_index)
+        self._call_index += 1
+        logits = torch.zeros(input_ids.size(0), n, self.vocab)
+        return type("Out", (), {"logits": logits})()
+
+
+def test_run_eval_hfold_uses_bounded_window_context():
+    model = _PrefixRecorderModel()
+    dataloader = [
+        {
+            "input_ids": torch.zeros(1, 9, dtype=torch.long),
+            "attention_mask": torch.ones(1, 9, dtype=torch.long),
+            "labels": torch.zeros(1, 9, dtype=torch.long),
+        }
+    ]
+    _run_eval(model, dataloader, torch.device("cpu"), hfold_window_size=4)
+    assert model.seen_prefix_lens, "eval should execute autoregressive hfold path"
+    assert max(model.seen_prefix_lens) <= 4
+
+
+def _run_for_seq_len(seq_len: int, window_size: int) -> _PrefixRecorderModel:
+    model = _PrefixRecorderModel()
+    dataloader = [
+        {
+            "input_ids": torch.zeros(1, seq_len, dtype=torch.long),
+            "attention_mask": torch.ones(1, seq_len, dtype=torch.long),
+            "labels": torch.zeros(1, seq_len, dtype=torch.long),
+        }
+    ]
+    _run_eval(model, dataloader, torch.device("cpu"), hfold_window_size=window_size)
+    return model
+
+
+def test_run_eval_hfold_total_work_is_linear_for_bounded_window():
+    """Spec: HFold per-timestep cost must be bounded by W (so total work is O(n*W)
+    which is O(n) for fixed W). We verify this by running the eval at multiple
+    sequence lengths and asserting the slope of total work vs. n is exactly W
+    (after the warmup of length W).
+    """
+    window = 8
+    work = {n: _run_for_seq_len(n, window).tokens_processed for n in (16, 32, 64)}
+
+    # Closed-form: sum_{t=1..n-1} min(t, W). For n >= W this is W*(W+1)/2 +
+    # W*(n-1-W) = W*(n - W/2 - 1/2). Slope across n values must be exactly W.
+    slope_lo = (work[32] - work[16]) / (32 - 16)
+    slope_hi = (work[64] - work[32]) / (64 - 32)
+    assert slope_lo == window, f"expected slope {window}, got {slope_lo} (work={work})"
+    assert slope_hi == window, f"expected slope {window}, got {slope_hi} (work={work})"
+    # Sanity: total work is bounded by W * (n-1).
+    for n, w in work.items():
+        assert w <= window * (n - 1), f"work {w} exceeds linear bound for n={n}"
+
+
+def test_run_eval_hfold_per_timestep_prefix_is_bounded_by_window():
+    window = 4
+    model = _run_for_seq_len(seq_len=20, window_size=window)
+    assert max(model.seen_prefix_lens) == window
+    # Once we are past the warmup we should be saturated at W.
+    saturated = [length for length in model.seen_prefix_lens if length == window]
+    assert len(saturated) == 20 - 1 - (window - 1)
+
+
+def test_run_eval_hfold_heap_persists_within_a_sequence():
+    """Heap evolves across timesteps WITHIN a sequence; runtime must NOT be
+    reset per timestep. We assert that the model's per-call observation index
+    is monotonically increasing inside a row.
+    """
+    model = _PrefixRecorderModel()
+    dataloader = [
+        {
+            "input_ids": torch.zeros(1, 6, dtype=torch.long),
+            "attention_mask": torch.ones(1, 6, dtype=torch.long),
+            "labels": torch.zeros(1, 6, dtype=torch.long),
+        }
+    ]
+    _run_eval(model, dataloader, torch.device("cpu"), hfold_window_size=3)
+    assert model.call_count_observed == [0, 1, 2, 3, 4]
+    # _run_eval resets once for the batch and once for the single row.
+    assert model.hfold_runtime.reset_calls == 2
 
 
 def test_runtime_dedupes_popped_token_positions_from_top_w():
@@ -431,3 +637,10 @@ def test_runner_loads_aux_checkpoints(tmp_path):
         assert torch.equal(src_param, target_param)
     for src_param, target_param in zip(src_adapters.parameters(), target_adapters.parameters()):
         assert torch.equal(src_param, target_param)
+
+
+def test_default_embedding_latent_dim_is_true_bottleneck():
+    config = HFoldConfig(model=HFoldModelConfig(hidden_size=256, num_heads=8, adapter_dim=128))
+    config.validate()
+    assert config.model.embedding_latent_dim is not None
+    assert config.model.embedding_latent_dim < config.model.adapter_dim

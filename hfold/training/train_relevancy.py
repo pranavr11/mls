@@ -46,6 +46,8 @@ def train_relevancy_model(
             heap_list = [t.to(device) for t in batch["heap_vectors"]]
             teacher_scores = batch["teacher_scores"].to(device)
             padding_mask = batch["padding_mask"].to(device)
+            if torch.any(teacher_scores < 0):
+                raise ValueError("teacher_scores must be non-negative probabilities.")
 
             encoded_evicted = [adapters.encode(b, vec) for b, vec in zip(backbones, evicted_list)]
             encoded_heap = [adapters.encode(b, vec) for b, vec in zip(backbones, heap_list)]
@@ -53,7 +55,10 @@ def train_relevancy_model(
             encoded_heap_batch = torch.stack(encoded_heap, dim=0)
             with torch.no_grad():
                 summary = embedding_model.encode_summary(encoded_evicted_batch, padding_mask=padding_mask)
-            pred_scores = model(summary, encoded_heap_batch)
+                # Relevancy model operates in adapter space; decode one slot from
+                # the bottleneck summary for scoring compatibility.
+                summary_for_relevancy = embedding_model.decode_from_summary(summary, num_slots=1).squeeze(1)
+            pred_scores = model(summary_for_relevancy, encoded_heap_batch)
             target_distribution = teacher_scores / teacher_scores.sum(dim=-1, keepdim=True).clamp_min(1e-6)
             pred_log_distribution = F.log_softmax(pred_scores, dim=-1)
             pred_distribution = pred_log_distribution.exp()

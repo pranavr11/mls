@@ -62,7 +62,10 @@ def main():
     model = bundle.model
     inputs = tokenizer(args.prompt, return_tensors="pt")
     with torch.no_grad():
-        output = model.generate(**inputs, max_new_tokens=args.max_new_tokens, use_cache=False)
+        # KV cache stays on. The HFold hook prepends heap tokens for this
+        # timestep only and splices them out of the returned cache so future
+        # generation steps see a clean sliding-window cache.
+        output = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
     print(tokenizer.decode(output[0], skip_special_tokens=True))
 
 

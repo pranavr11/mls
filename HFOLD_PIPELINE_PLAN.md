@@ -173,7 +173,8 @@ The relevancy model is shared across Pythia and GPT-2 by working in the shared l
 `hfold/integration/benchmark_runner.py`:
 
 - `_run_eval` already resets HFold runtime per batch.
-- Add support for **chunked HFold** evaluation: when running the HFold mode, the runner walks each sequence chunk-by-chunk (chunk_len = `W`) and computes loss as mean over chunks.
+- HFold mode runs autoregressively but with a **bounded context window** of size `W` (`hfold_window_size=sliding_window_size`), so each timestep forward is capped to at most `W` tokens of real sequence input while the global heap state persists across timesteps. This keeps end-to-end HFold benchmark cost linear in sequence length for fixed `W` (matching sliding-window spirit) instead of triangular-prefix `O(n^2)` reprocessing.
+- The HFold model hook keeps the backbone's standard sliding-window KV cache **on**: it does NOT force `use_cache=False` and does NOT strip caller-supplied `past_key_values`. The K heap rows are prepended only as inputs for THIS timestep, and the hook splices them back out of the returned `past_key_values` so future timesteps see a clean sequence-only cache (no heap pollution). `position_ids` is dropped on the augmented call so the backbone re-derives positions from `past_kv_length + current_input_length` consistent with the prepended heap rows + the real new tokens.
 - The full-attention and sliding-window modes continue to do single-pass forward (they don't need chunking).
 - All three modes share the same dataloader, tokenizer, and chunk boundary.
 
