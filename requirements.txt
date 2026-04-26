@@ -1,0 +1,11 @@
+datasets==2.18.0
+transformers>=4.36,<4.45
+torch
+evaluate
+tqdm
+matplotlib
+pandas
+python-dotenv
+absl-py
+nltk
+rouge-score
