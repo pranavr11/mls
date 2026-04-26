@@ -16,7 +16,10 @@ from __future__ import annotations
 from types import MethodType
 from typing import Any
 
+import json
+import os
 import torch
+import time
 
 from ..models.interfaces import EmbeddingModelProtocol, RelevancyModelProtocol
 from .hfold_runtime import HFoldRuntime
@@ -24,6 +27,25 @@ from .vector_store import append_heap_vectors, split_appended_outputs
 
 
 GLOBAL_HEAP_INDEX = 0
+
+
+def _agent_debug_log(*, hypothesis_id: str, message: str, data: dict) -> None:
+    payload = {
+        "sessionId": "d87f41",
+        "runId": "findings-followup",
+        "hypothesisId": hypothesis_id,
+        "location": "hfold/inference/model_hook.py:_select_top_candidates",
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        log_path = "/Users/adityadewan/Documents/PROFESSIONAL./UNIVERSITY./CARNEGIE MELLON UNIVERSITY./YEAR TWO./SEMESTER TWO./15-442 - MACHINE LEARNING SYSTEMS./MLSFINAL/.cursor/debug-d87f41.log"
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+    except OSError:
+        pass
 
 
 def _expand_attention_mask_for_prepend(
@@ -57,7 +79,32 @@ def _select_top_candidates(
     token_vectors: torch.Tensor,
     top_w: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    score_per_key = attn_weights.mean(dim=1).mean(dim=1)
+    # Use the current-query (last query row) attention distribution averaged
+    # over heads. This matches autoregressive timestep semantics: select
+    # candidates relevant to the token being predicted now.
+    score_per_key = attn_weights.mean(dim=1)[:, -1, :]
+    # region agent log
+    try:
+        last_query_scores = attn_weights[:, :, -1, :].mean(dim=1)
+        legacy_global_scores = attn_weights.mean(dim=1).mean(dim=1)
+        legacy_global_idx = torch.topk(legacy_global_scores[:, : token_vectors.size(1)], k=min(top_w, legacy_global_scores.size(-1), token_vectors.size(1)), dim=-1).indices
+        selected_idx = torch.topk(score_per_key[:, : token_vectors.size(1)], k=min(top_w, score_per_key.size(-1), token_vectors.size(1)), dim=-1).indices
+        last_idx = torch.topk(last_query_scores[:, : token_vectors.size(1)], k=min(top_w, last_query_scores.size(-1), token_vectors.size(1)), dim=-1).indices
+        _agent_debug_log(
+            hypothesis_id="H3",
+            message="top-w semantics legacy-global-vs-last-query comparison",
+            data={
+                "k": int(selected_idx.size(-1)),
+                "selected_idx": selected_idx[0].tolist() if selected_idx.size(0) > 0 else [],
+                "legacy_global_idx": legacy_global_idx[0].tolist() if legacy_global_idx.size(0) > 0 else [],
+                "last_query_idx": last_idx[0].tolist() if last_idx.size(0) > 0 else [],
+                "selected_matches_last_query": bool(torch.equal(selected_idx, last_idx)),
+                "legacy_matches_last_query": bool(torch.equal(legacy_global_idx, last_idx)),
+            },
+        )
+    except Exception:
+        pass
+    # endregion
     k = min(top_w, score_per_key.size(-1), token_vectors.size(1))
     scores, indices = torch.topk(score_per_key[:, : token_vectors.size(1)], k=k, dim=-1)
     gather_index = indices.unsqueeze(-1).expand(-1, -1, token_vectors.size(-1))
@@ -127,21 +174,20 @@ class HFoldModelHook:
             (key in kwargs and kwargs.get(key) is not None) for key in cache_keys
         )
 
-        def _build_aux_kwargs() -> dict[str, Any]:
-            aux_kwargs = dict(kwargs)
-            aux_kwargs["output_attentions"] = True
-            aux_kwargs["return_dict"] = True
-            aux_kwargs["use_cache"] = False
-            aux_kwargs.pop("position_ids", None)
+        # HFold heap injection is incompatible with naive KV caching: the heap
+        # rows do not correspond to past tokens, so we cannot safely splice
+        # them into a HuggingFace-style past cache. We therefore always run a
+        # single, no-cache augmented forward. position_ids is dropped so the
+        # backbone derives positions from sequence length on its own.
+        def _build_unified_kwargs() -> dict[str, Any]:
+            unified = dict(kwargs)
+            unified["output_attentions"] = True
+            unified["return_dict"] = True
+            unified["use_cache"] = False
+            unified.pop("position_ids", None)
             for cache_key in cache_keys:
-                aux_kwargs.pop(cache_key, None)
-            return aux_kwargs
-
-        def _build_primary_kwargs() -> dict[str, Any]:
-            primary_kwargs = dict(kwargs)
-            primary_kwargs["output_attentions"] = caller_requested_attn
-            primary_kwargs["return_dict"] = True
-            return primary_kwargs
+                unified.pop(cache_key, None)
+            return unified
 
         layer_state = self.runtime._get_layer_state(GLOBAL_HEAP_INDEX)
         timestep = int(layer_state.call_count)
@@ -149,31 +195,15 @@ class HFoldModelHook:
         embeds = self._resolve_embeds(input_ids, inputs_embeds)
 
         if timestep == 0:
-            aux_kwargs = _build_aux_kwargs()
-            if has_cache_context:
-                primary_outputs = original_forward(
-                    *args,
-                    inputs_embeds=embeds,
-                    attention_mask=attention_mask,
-                    **_build_primary_kwargs(),
-                )
-                aux_outputs = original_forward(
-                    *args,
-                    inputs_embeds=embeds,
-                    attention_mask=attention_mask,
-                    **aux_kwargs,
-                )
-                outputs_for_heap = aux_outputs
-                outputs_to_return = primary_outputs
-            else:
-                outputs = original_forward(
-                    *args,
-                    inputs_embeds=embeds,
-                    attention_mask=attention_mask,
-                    **aux_kwargs,
-                )
-                outputs_for_heap = outputs
-                outputs_to_return = outputs
+            unified_kwargs = _build_unified_kwargs()
+            outputs = original_forward(
+                *args,
+                inputs_embeds=embeds,
+                attention_mask=attention_mask,
+                **unified_kwargs,
+            )
+            outputs_for_heap = outputs
+            outputs_to_return = outputs
             last_hidden = self._extract_last_hidden(outputs_for_heap)
             last_attn = self._last_attention(outputs_for_heap)
             scores, vectors, indices = _select_top_candidates(last_attn, last_hidden, self.runtime.config.model.top_w)
@@ -205,42 +235,25 @@ class HFoldModelHook:
 
         augmented_embeds = append_heap_vectors(embeds, heap_vectors)
         new_total = augmented_embeds.size(1)
-        primary_attention_mask = attention_mask
-        aux_attention_mask = attention_mask
-        if aux_attention_mask is not None:
-            aux_attention_mask = _expand_attention_mask_for_prepend(
-                aux_attention_mask,
+        augmented_attention_mask = attention_mask
+        if augmented_attention_mask is not None:
+            augmented_attention_mask = _expand_attention_mask_for_prepend(
+                augmented_attention_mask,
                 heap_len=heap_len,
                 new_total=new_total,
                 device=embeds.device,
                 dtype=embeds.dtype,
             )
 
-        aux_kwargs = _build_aux_kwargs()
-        if has_cache_context:
-            primary_outputs = original_forward(
-                *args,
-                inputs_embeds=embeds,
-                attention_mask=primary_attention_mask,
-                **_build_primary_kwargs(),
-            )
-            aux_outputs = original_forward(
-                *args,
-                inputs_embeds=augmented_embeds,
-                attention_mask=aux_attention_mask,
-                **aux_kwargs,
-            )
-            outputs_for_heap = aux_outputs
-            outputs_to_return = primary_outputs
-        else:
-            outputs = original_forward(
-                *args,
-                inputs_embeds=augmented_embeds,
-                attention_mask=aux_attention_mask,
-                **aux_kwargs,
-            )
-            outputs_for_heap = outputs
-            outputs_to_return = outputs
+        unified_kwargs = _build_unified_kwargs()
+        outputs = original_forward(
+            *args,
+            inputs_embeds=augmented_embeds,
+            attention_mask=augmented_attention_mask,
+            **unified_kwargs,
+        )
+        outputs_for_heap = outputs
+        outputs_to_return = outputs
         last_hidden = self._extract_last_hidden(outputs_for_heap)
         last_attn = self._last_attention(outputs_for_heap)
         token_output, transformed_heap = split_appended_outputs(last_hidden, seq_len)
@@ -308,6 +321,8 @@ def wrap_pythia_with_hfold(
         relevancy_model=relevancy_model,
     )
     _bind_trunk_forward(trunk, hook)
+    # Expose runtime so callers can reset heap state per sequence/batch.
+    model.hfold_runtime = runtime
     return model
 
 
@@ -327,4 +342,5 @@ def wrap_gpt2_with_hfold(
         relevancy_model=relevancy_model,
     )
     _bind_trunk_forward(trunk, hook)
+    model.hfold_runtime = runtime
     return model

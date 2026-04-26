@@ -42,24 +42,22 @@ def train_relevancy_model(
     for _ in range(config.training.num_epochs):
         for batch in loader:
             backbones = batch["backbones"]
-            evicted_vectors = batch["evicted_vectors"].to(device)
-            heap_vectors = batch["heap_vectors"].to(device)
+            evicted_list = [t.to(device) for t in batch["evicted_vectors"]]
+            heap_list = [t.to(device) for t in batch["heap_vectors"]]
             teacher_scores = batch["teacher_scores"].to(device)
             padding_mask = batch["padding_mask"].to(device)
 
-            encoded_evicted = []
-            encoded_heap = []
-            for row, backbone in enumerate(backbones):
-                encoded_evicted.append(adapters.encode(backbone, evicted_vectors[row]))
-                encoded_heap.append(adapters.encode(backbone, heap_vectors[row]))
+            encoded_evicted = [adapters.encode(b, vec) for b, vec in zip(backbones, evicted_list)]
+            encoded_heap = [adapters.encode(b, vec) for b, vec in zip(backbones, heap_list)]
             encoded_evicted_batch = torch.stack(encoded_evicted, dim=0)
             encoded_heap_batch = torch.stack(encoded_heap, dim=0)
             with torch.no_grad():
                 summary = embedding_model.encode_summary(encoded_evicted_batch, padding_mask=padding_mask)
             pred_scores = model(summary, encoded_heap_batch)
             target_distribution = teacher_scores / teacher_scores.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-            pred_distribution = torch.softmax(pred_scores, dim=-1)
-            kl = F.kl_div(pred_distribution.log(), target_distribution, reduction="batchmean")
+            pred_log_distribution = F.log_softmax(pred_scores, dim=-1)
+            pred_distribution = pred_log_distribution.exp()
+            kl = F.kl_div(pred_log_distribution, target_distribution, reduction="batchmean")
             mse = F.mse_loss(pred_distribution, target_distribution)
             rank = ranking_loss(pred_scores, teacher_scores)
             loss = kl + config.training.mse_loss_weight * mse + config.training.ranking_loss_weight * rank

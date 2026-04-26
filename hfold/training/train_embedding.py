@@ -57,18 +57,25 @@ def train_embedding_model(
     for _ in range(config.training.num_epochs):
         for batch in loader:
             backbones = batch["backbones"]
-            evicted_vectors = batch["evicted_vectors"].to(device)
+            evicted_list = [t.to(device) for t in batch["evicted_vectors"]]
             padding_mask = batch["padding_mask"].to(device)
-            encoded = []
-            for row, backbone in enumerate(backbones):
-                encoded.append(adapters.encode(backbone, evicted_vectors[row]))
+            # Encode each per-sample evicted block through its backbone adapter
+            # into shared latent dim; only stack after that so heterogeneous
+            # raw hidden sizes (Pythia vs GPT-2) are supported.
+            encoded = [adapters.encode(b, vec) for b, vec in zip(backbones, evicted_list)]
             encoded_batch = torch.stack(encoded, dim=0)
             reconstructed, _ = model(encoded_batch, padding_mask=padding_mask)
-            decoded = []
-            for row, backbone in enumerate(backbones):
-                decoded.append(adapters.decode(backbone, reconstructed[row]))
-            decoded_batch = torch.stack(decoded, dim=0)
-            loss = cosine_reconstruction_loss(decoded_batch, evicted_vectors, mask=padding_mask)
+            decoded = [adapters.decode(b, reconstructed[i]) for i, b in enumerate(backbones)]
+            # Per-sample reconstruction loss in original backbone space.
+            losses = [
+                cosine_reconstruction_loss(
+                    decoded[i].unsqueeze(0),
+                    evicted_list[i].unsqueeze(0),
+                    mask=padding_mask[i : i + 1],
+                )
+                for i in range(len(backbones))
+            ]
+            loss = torch.stack(losses).mean()
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(adapters.parameters()), config.training.gradient_clip_norm)
