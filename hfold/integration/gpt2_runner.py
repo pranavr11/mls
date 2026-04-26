@@ -6,8 +6,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..config.schema import HFoldConfig
-from ..inference.attention_patch import patch_gpt2_model_attention
 from ..inference.hfold_runtime import HFoldRuntime
+from ..inference.model_hook import wrap_gpt2_with_hfold
 from ..models.adapters import BackboneAdapterRegistry
 from ..models.embedding_autoencoder import EmbeddingAutoencoder
 from ..models.relevancy_transformer import RelevancyTransformer
@@ -45,7 +45,7 @@ def build_gpt2_with_hfold(
     relevancy_model = RelevancyTransformer(hidden_size=config.model.adapter_dim)
     adapters = BackboneAdapterRegistry(specs={"pythia": config.model.hidden_size, "gpt2": config.model.hidden_size}, shared_dim=config.model.adapter_dim)
     runtime.attach_adapters(adapters, "gpt2")
-    patch_gpt2_model_attention(model, runtime, embedding_model, relevancy_model)
+    wrap_gpt2_with_hfold(model, runtime, embedding_model, relevancy_model)
     return HFoldGPT2Bundle(
         model=model,
         tokenizer=tokenizer,

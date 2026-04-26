@@ -158,14 +158,20 @@ class HFoldRuntime:
                 )
             )
 
+        # Per spec: top-w must NOT contain duplicates of the K popped vectors.
+        # We treat token_position as the identity key.
+        popped_positions = {int(entry.token_position) for entry in popped_entries}
         local_limit = min(self.config.model.top_w, int(new_vectors.size(0)))
         for idx in range(local_limit):
+            candidate_position = int(new_token_positions[idx].item())
+            if candidate_position in popped_positions:
+                continue
             reinsert_entries.append(
                 self._build_entry(
                     layer_state=layer_state,
                     vector=new_vectors[idx],
                     score=float(new_scores[idx].item()),
-                    token_position=int(new_token_positions[idx].item()),
+                    token_position=candidate_position,
                     layer_index=layer_index,
                     head_index=int(new_head_indices[idx].item()),
                     time_index=time_index,

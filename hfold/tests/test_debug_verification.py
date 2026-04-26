@@ -1,87 +1,20 @@
 """
-Regression tests guarding the four critical HFold algorithm invariants:
+Regression tests guarding the critical HFold algorithm invariants under the
+global-heap (model-level) implementation.
 
-- Multi-layer patching uses distinct wrappers per layer (no late-binding closure).
-- Per-layer call counts drive timestep semantics (not a single global counter mutated per layer).
 - Heap vectors are prepended so original tokens see them under causal masking.
-- Auxiliary models receive adapter-encoded inputs at inference (matches training distribution).
+- Auxiliary models receive adapter-encoded inputs at inference.
 """
 from __future__ import annotations
 
 import torch
-from torch import nn
 
 from hfold.config.schema import HFoldConfig, HFoldModelConfig
-from hfold.inference.attention_patch import patch_pythia_model_attention
 from hfold.inference.hfold_runtime import HFoldRuntime
 from hfold.inference.vector_store import append_heap_vectors, split_appended_outputs
 from hfold.models.adapters import BackboneAdapterRegistry
 from hfold.models.embedding_autoencoder import EmbeddingAutoencoder
 from hfold.models.relevancy_transformer import RelevancyTransformer
-
-
-class CausalAttentionLayer(nn.Module):
-    def __init__(self, hidden_size: int) -> None:
-        super().__init__()
-        self.query_key_value = nn.Linear(hidden_size, hidden_size * 3)
-        self.dense = nn.Linear(hidden_size, hidden_size)
-        self.scale = hidden_size ** -0.5
-
-    def forward(self, hidden_states, *args, **kwargs):
-        del args, kwargs
-        b, s, d = hidden_states.shape
-        qkv = self.query_key_value(hidden_states)
-        q, k, v = qkv.chunk(3, dim=-1)
-        scores = torch.einsum("bsd,btd->bst", q, k) * self.scale
-        causal = torch.tril(torch.ones(s, s, dtype=torch.bool, device=hidden_states.device))
-        scores = scores.masked_fill(~causal, float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        out = self.dense(torch.einsum("bst,btd->bsd", attn, v))
-        return out, None, attn.unsqueeze(1)
-
-
-class TwoLayerModel(nn.Module):
-    def __init__(self, hidden_size: int) -> None:
-        super().__init__()
-        self.layer0 = CausalAttentionLayer(hidden_size)
-        self.layer1 = CausalAttentionLayer(hidden_size)
-
-    def forward(self, hidden_states):
-        out, _, _ = self.layer0(hidden_states)
-        out, _, _ = self.layer1(out)
-        return out
-
-
-def test_multi_layer_per_layer_call_counts():
-    torch.manual_seed(0)
-    hidden_size = 8
-    adapter_dim = 16
-    config = HFoldConfig(
-        model=HFoldModelConfig(
-            hidden_size=hidden_size,
-            num_heads=2,
-            max_heap_size=4,
-            top_w=2,
-            pop_k=2,
-            adapter_dim=adapter_dim,
-        )
-    )
-    runtime = HFoldRuntime(config)
-    adapters = BackboneAdapterRegistry(specs={"pythia": hidden_size}, shared_dim=adapter_dim)
-    runtime.attach_adapters(adapters, "pythia")
-    model = TwoLayerModel(hidden_size)
-    embed = EmbeddingAutoencoder(hidden_size=adapter_dim, latent_size=adapter_dim, max_slots=config.model.max_heap_size)
-    rel = RelevancyTransformer(hidden_size=adapter_dim, num_layers=1, num_heads=2)
-    patch_pythia_model_attention(model, runtime, embed, rel)
-
-    x = torch.randn(1, 6, hidden_size)
-    _ = model(x)
-    _ = model(x)
-
-    assert 0 in runtime.state.layers
-    assert 1 in runtime.state.layers
-    assert runtime.state.layers[0].call_count == 2
-    assert runtime.state.layers[1].call_count == 2
 
 
 def test_prepended_heap_visible_to_original_tokens():
