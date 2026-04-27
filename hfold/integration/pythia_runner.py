@@ -73,6 +73,7 @@ def build_pythia_with_hfold(
         )
     runtime.attach_adapters(adapters, "pythia")
     wrap_pythia_with_hfold(model, runtime, embedding_model, relevancy_model)
+    model.add_module("hfold_adapters", adapters)
     return HFoldPythiaBundle(
         model=model,
         tokenizer=tokenizer,

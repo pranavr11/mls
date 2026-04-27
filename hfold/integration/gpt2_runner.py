@@ -77,6 +77,7 @@ def build_gpt2_with_hfold(
         )
     runtime.attach_adapters(adapters, "gpt2")
     wrap_gpt2_with_hfold(model, runtime, embedding_model, relevancy_model)
+    model.add_module("hfold_adapters", adapters)
     return HFoldGPT2Bundle(
         model=model,
         tokenizer=tokenizer,

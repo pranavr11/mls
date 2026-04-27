@@ -14,19 +14,14 @@ from .pythia_runner import build_pythia_with_hfold
 
 
 def _move_hfold_bundle_to_device(model: torch.nn.Module, device_obj: torch.device) -> None:
-    """Move LM + HFold aux modules (not nn children of the causal LM)."""
+    """Move the causal LM plus HFold submodules (embedding, relevancy, adapters)."""
     model.to(device_obj)
-    emb = getattr(model, "hfold_embedding_model", None)
-    rel = getattr(model, "hfold_relevancy_model", None)
-    if emb is not None:
-        emb.to(device_obj)
-    if rel is not None:
-        rel.to(device_obj)
-    # Adapters live on HFoldRuntime (not a submodule of the LM); encode/decode runs on heap vectors.
+    # Legacy builds: adapters only on HFoldRuntime, not registered via add_module("hfold_adapters").
     runtime = getattr(model, "hfold_runtime", None)
     if runtime is not None:
         adapters = getattr(runtime, "_adapters", None)
-        if adapters is not None:
+        reg = getattr(model, "hfold_adapters", None)
+        if adapters is not None and reg is not adapters:
             adapters.to(device_obj)
 
 
