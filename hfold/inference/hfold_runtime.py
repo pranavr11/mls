@@ -202,6 +202,10 @@ class HFoldRuntime:
         self._get_layer_state(layer_index)
         return self._tensor_heaps[layer_index]
 
+    def _should_run_aux_fold(self, *, time_index: int) -> bool:
+        interval = max(1, int(getattr(self.config.model, "aux_fold_interval", 1)))
+        return int(time_index) % interval == 0
+
     def prime_timestep_zero(
         self,
         *,
@@ -395,15 +399,16 @@ class HFoldRuntime:
                 evicted_tensor = raw_evicted[:, :target_slots, :]
             padding_mask = torch.zeros(1, target_slots, dtype=torch.bool, device=evicted_tensor.device)
             padding_mask[:, : min(slot_count, target_slots)] = True
-            self._ensure_aux_on_device(evicted_tensor.device, embedding_model, relevancy_model)
-            evicted_latent = self._encode_for_aux_models(evicted_tensor)
-            summary = embedding_model.encode_summary(evicted_latent, padding_mask=padding_mask)
-            self._fold_current_heap(
-                layer_index=layer_index,
-                summary=summary,
-                embedding_model=embedding_model,
-                relevancy_model=relevancy_model,
-            )
+            if self._should_run_aux_fold(time_index=time_index):
+                self._ensure_aux_on_device(evicted_tensor.device, embedding_model, relevancy_model)
+                evicted_latent = self._encode_for_aux_models(evicted_tensor)
+                summary = embedding_model.encode_summary(evicted_latent, padding_mask=padding_mask)
+                self._fold_current_heap(
+                    layer_index=layer_index,
+                    summary=summary,
+                    embedding_model=embedding_model,
+                    relevancy_model=relevancy_model,
+                )
 
         self._maybe_update_debug_heap(layer_index)
         self.state.timestep = max(self.state.timestep, time_index)

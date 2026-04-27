@@ -10,6 +10,7 @@ class HFoldModelConfig:
     max_heap_size: int = 16
     top_w: int = 8
     pop_k: int = 8
+    aux_fold_interval: int = 1
     adapter_dim: int = 256
     embedding_latent_dim: int | None = None
 
@@ -26,6 +27,8 @@ class HFoldModelConfig:
             raise ValueError("top_w must be >= 0.")
         if self.pop_k < 0:
             raise ValueError("pop_k must be >= 0.")
+        if self.aux_fold_interval <= 0:
+            raise ValueError("aux_fold_interval must be >= 1.")
         # Interpret out-of-range defaults as "use up to heap capacity".
         if self.pop_k > self.max_heap_size:
             self.pop_k = self.max_heap_size
