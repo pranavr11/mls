@@ -123,10 +123,29 @@ class _SlidingWindowMaskWrapper(torch.nn.Module):
         if self.window_size <= 0:
             return self.original_attention(hidden_states, *args, **kwargs)
 
-        # GPT-NeoX attention often receives the 4D mask as a positional arg.
-        # If we only inspect kwargs, sliding-window becomes a no-op.
+        def _window_block(src_len: int, tgt_len: int, device: torch.device) -> torch.Tensor:
+            idx_tgt = torch.arange(src_len - tgt_len, src_len, device=device).unsqueeze(1)
+            idx_src = torch.arange(src_len, device=device).unsqueeze(0)
+            out_of_window = (idx_tgt - idx_src) >= self.window_size
+            future = idx_src > idx_tgt
+            return out_of_window | future
+
+        def _make_additive_mask(blocked: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+            out = torch.zeros(blocked.shape, dtype=dtype, device=blocked.device)
+            min_val = torch.finfo(dtype).min
+            return out.masked_fill(blocked, min_val)
+
+        # GPT-NeoX attention often receives `attention_mask` positionally as arg[0].
+        # If this is None, we synthesize an explicit local causal mask so sliding-window
+        # has effect even on SDPA-style call paths.
+        is_neox = "NeoX" in type(self.original_attention).__name__
         mask = kwargs.get("attention_mask")
         mask_pos = None
+        if mask is None and is_neox and args:
+            candidate = args[0]
+            if candidate is None or (torch.is_tensor(candidate) and candidate.dim() in (2, 4)):
+                mask = candidate
+                mask_pos = 0
         if mask is None and args:
             for i, candidate in enumerate(args):
                 if torch.is_tensor(candidate) and candidate.dim() == 4:
@@ -134,19 +153,37 @@ class _SlidingWindowMaskWrapper(torch.nn.Module):
                     mask_pos = i
                     break
 
+        modified = None
         if torch.is_tensor(mask) and mask.dim() == 4:
             tgt_len = mask.shape[-2]
             src_len = mask.shape[-1]
-            idx_tgt = torch.arange(src_len - tgt_len, src_len, device=mask.device).unsqueeze(1)
-            idx_src = torch.arange(src_len, device=mask.device).unsqueeze(0)
-            out_of_window = (idx_tgt - idx_src) >= self.window_size
+            blocked = _window_block(src_len, tgt_len, mask.device)
             modified = mask.clone()
             if modified.dtype == torch.bool:
-                modified = modified.masked_fill(out_of_window, False)
+                modified = modified.masked_fill(blocked, False)
             else:
                 min_val = torch.finfo(modified.dtype).min
-                modified = modified.masked_fill(out_of_window, min_val)
+                modified = modified.masked_fill(blocked, min_val)
+        elif torch.is_tensor(mask) and mask.dim() == 2:
+            # Convert a 2D padding mask [B, S] into additive 4D [B, 1, T, S] and
+            # apply both causal + local-window masking.
+            batch, src_len = mask.shape
+            tgt_len = hidden_states.shape[1]
+            blocked = _window_block(src_len, tgt_len, hidden_states.device)
+            blocked = blocked.unsqueeze(0).unsqueeze(0).expand(batch, 1, tgt_len, src_len)
+            allowed_src = mask.to(torch.bool).unsqueeze(1).unsqueeze(1).expand(batch, 1, tgt_len, src_len)
+            blocked = blocked | (~allowed_src)
+            modified = _make_additive_mask(blocked, dtype=hidden_states.dtype)
+        elif mask is None:
+            # No mask provided to attention: enforce local causal mask directly.
+            batch = hidden_states.shape[0]
+            tgt_len = hidden_states.shape[1]
+            src_len = tgt_len
+            blocked = _window_block(src_len, tgt_len, hidden_states.device)
+            blocked = blocked.unsqueeze(0).unsqueeze(0).expand(batch, 1, tgt_len, src_len)
+            modified = _make_additive_mask(blocked, dtype=hidden_states.dtype)
 
+        if modified is not None:
             if mask_pos is not None:
                 args = list(args)
                 args[mask_pos] = modified
