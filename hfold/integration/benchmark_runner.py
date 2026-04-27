@@ -41,6 +41,7 @@ def _run_eval(
     device: torch.device,
     *,
     hfold_window_size: int | None = None,
+    hfold_eval_use_kv_cache: bool = True,
 ) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
@@ -73,7 +74,7 @@ def _run_eval(
                 row_mask = None if attention_mask is None else attention_mask[row : row + 1]
                 seq_len = int(row_ids.size(1))
                 past_kv = None
-                supports_cache = True
+                supports_cache = bool(hfold_eval_use_kv_cache)
                 for next_pos in range(1, seq_len):
                     out = None
                     if supports_cache:
@@ -288,6 +289,7 @@ def eval_hfold_only(
     config: HFoldConfig,
     device: str = "cpu",
     sliding_window_size: int = 256,
+    hfold_eval_use_kv_cache: bool = True,
     embedding_checkpoint_path: str | None = None,
     relevancy_checkpoint_path: str | None = None,
     adapters_checkpoint_path: str | None = None,
@@ -315,6 +317,7 @@ def eval_hfold_only(
         dataloader,
         device_obj,
         hfold_window_size=sliding_window_size,
+        hfold_eval_use_kv_cache=hfold_eval_use_kv_cache,
     )
     return _to_result(mode_label, loss, tok_s)
 
@@ -328,6 +331,7 @@ def benchmark_three_modes(
     config: HFoldConfig,
     device: str = "cpu",
     sliding_window_size: int = 256,
+    hfold_eval_use_kv_cache: bool = True,
     full_model_factory: Callable[[], torch.nn.Module] | None = None,
     sliding_model_factory: Callable[[], torch.nn.Module] | None = None,
     embedding_checkpoint_path: str | None = None,
@@ -391,6 +395,7 @@ def benchmark_three_modes(
         dataloader,
         device_obj,
         hfold_window_size=sliding_window_size,
+        hfold_eval_use_kv_cache=hfold_eval_use_kv_cache,
     )
     results.append(_to_result("hfold", hfold_loss, hfold_tok_s))
 
