@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from ..config.schema import HFoldConfig
+from .checkpoint_utils import load_gpt_neox_causal_lm_from_folder
 from .gpt2_runner import build_gpt2_with_hfold
 from .pythia_runner import build_pythia_with_hfold
 
@@ -250,7 +251,12 @@ def benchmark_three_modes(
 
     def _default_full_factory() -> torch.nn.Module:
         from transformers import AutoModelForCausalLM
-        return AutoModelForCausalLM.from_pretrained(checkpoint_path or model_name)
+
+        if checkpoint_path and backbone == "pythia":
+            return load_gpt_neox_causal_lm_from_folder(checkpoint_path, cache_dir="./data")
+        if checkpoint_path:
+            return AutoModelForCausalLM.from_pretrained(checkpoint_path)
+        return AutoModelForCausalLM.from_pretrained(model_name)
 
     def _default_sliding_factory() -> torch.nn.Module:
         model = (full_model_factory or _default_full_factory)()

@@ -41,14 +41,30 @@ class HFoldRuntime:
         self._adapters = adapters
         self._backbone = backbone
 
+    def _ensure_aux_on_device(
+        self,
+        device: torch.device,
+        embedding_model: EmbeddingModelProtocol,
+        relevancy_model: RelevancyModelProtocol,
+    ) -> None:
+        """Keep adapter + aux MLPs on the same device as backbone activations."""
+        if self._adapters is not None:
+            self._adapters.to(device)
+        if isinstance(embedding_model, torch.nn.Module):
+            embedding_model.to(device)
+        if isinstance(relevancy_model, torch.nn.Module):
+            relevancy_model.to(device)
+
     def _encode_for_aux_models(self, vectors: torch.Tensor) -> torch.Tensor:
         if self._adapters is None or self._backbone is None:
             return vectors
+        self._adapters.to(vectors.device)
         return self._adapters.encode(self._backbone, vectors)
 
     def _decode_from_aux_models(self, vectors: torch.Tensor) -> torch.Tensor:
         if self._adapters is None or self._backbone is None:
             return vectors
+        self._adapters.to(vectors.device)
         return self._adapters.decode(self._backbone, vectors)
 
     def _get_layer_state(self, layer_index: int) -> HFoldLayerState:
@@ -193,6 +209,7 @@ class HFoldRuntime:
                 evicted_tensor = raw_evicted[:, :target_slots, :]
             padding_mask = torch.zeros(1, target_slots, dtype=torch.bool, device=evicted_tensor.device)
             padding_mask[:, : min(slot_count, target_slots)] = True
+            self._ensure_aux_on_device(evicted_tensor.device, embedding_model, relevancy_model)
             evicted_latent = self._encode_for_aux_models(evicted_tensor)
             summary = embedding_model.encode_summary(evicted_latent, padding_mask=padding_mask)
             self._fold_current_heap(
@@ -223,6 +240,7 @@ class HFoldRuntime:
         if not heap_entries:
             return
         heap_vectors_raw = torch.stack([entry.vector for entry in heap_entries], dim=0).unsqueeze(0)
+        self._ensure_aux_on_device(heap_vectors_raw.device, embedding_model, relevancy_model)
         heap_vectors_latent = self._encode_for_aux_models(heap_vectors_raw)
         # Relevancy model scores in adapter space. Decode one slot from the
         # bottleneck summary to recover adapter-space summary features.

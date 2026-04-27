@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ..config.schema import HFoldConfig
 from ..inference.hfold_runtime import HFoldRuntime
 from ..inference.model_hook import wrap_pythia_with_hfold
+from .checkpoint_utils import load_gpt_neox_causal_lm_from_folder
 from ..models.adapters import BackboneAdapterRegistry
 from ..models.embedding_autoencoder import EmbeddingAutoencoder
 from ..models.relevancy_transformer import RelevancyTransformer
@@ -37,7 +38,7 @@ def build_pythia_with_hfold(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     if checkpoint_path:
-        model = AutoModelForCausalLM.from_pretrained(checkpoint_path, cache_dir=cache_dir)
+        model = load_gpt_neox_causal_lm_from_folder(checkpoint_path, cache_dir=cache_dir)
     else:
         model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=cache_dir)
     detected_hidden = int(model.config.hidden_size)
