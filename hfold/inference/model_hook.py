@@ -129,6 +129,21 @@ def _select_top_candidates(
     return scores, vectors, indices
 
 
+def _select_top_candidates_from_hidden(
+    token_vectors: torch.Tensor,
+    top_w: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Matrix-only approximation: score each key by dot-product with current
+    # query token (last row), avoiding 4D attention tensor materialization.
+    query = token_vectors[:, -1:, :]
+    score_per_key = torch.matmul(token_vectors, query.transpose(-1, -2)).squeeze(-1)
+    k = min(top_w, score_per_key.size(-1), token_vectors.size(1))
+    scores, indices = torch.topk(score_per_key[:, : token_vectors.size(1)], k=k, dim=-1)
+    gather_index = indices.unsqueeze(-1).expand(-1, -1, token_vectors.size(-1))
+    vectors = torch.gather(token_vectors, dim=1, index=gather_index)
+    return scores, vectors, indices
+
+
 class HFoldModelHook:
     """One pop + one push per timestep against a single global heap."""
 
@@ -170,6 +185,13 @@ class HFoldModelHook:
             raise ValueError("HFold global hook needs last_hidden_state on trunk outputs.")
         return last_hidden
 
+    def _candidate_score_mode(self) -> str:
+        return str(getattr(self.runtime.config.model, "candidate_score_mode", "attention")).lower()
+
+    def _should_run_heap_step(self, *, timestep: int) -> bool:
+        interval = max(1, int(getattr(self.runtime.config.model, "hfold_step_interval", 1)))
+        return int(timestep) == 0 or (int(timestep) % interval) == 0
+
     # ------------------------------------------------------------------ forward
 
     def hooked_forward(
@@ -202,15 +224,28 @@ class HFoldModelHook:
         # input length` after we add the heap rows.
         def _build_unified_kwargs() -> dict[str, Any]:
             unified = dict(kwargs)
-            unified["output_attentions"] = True
+            if self._candidate_score_mode() == "attention":
+                unified["output_attentions"] = True
             unified["return_dict"] = True
             unified.pop("position_ids", None)
             return unified
 
         layer_state = self.runtime._get_layer_state(GLOBAL_HEAP_INDEX)
         timestep = int(layer_state.call_count)
+        run_heap_step = self._should_run_heap_step(timestep=timestep)
 
         embeds = self._resolve_embeds(input_ids, inputs_embeds)
+
+        if not run_heap_step:
+            outputs = original_forward(
+                *args,
+                inputs_embeds=embeds,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+            layer_state.call_count += 1
+            self.runtime.state.timestep = max(self.runtime.state.timestep, layer_state.call_count)
+            return outputs
 
         if timestep == 0:
             unified_kwargs = _build_unified_kwargs()
@@ -223,8 +258,11 @@ class HFoldModelHook:
             outputs_for_heap = outputs
             outputs_to_return = outputs
             last_hidden = self._extract_last_hidden(outputs_for_heap)
-            last_attn = self._last_attention(outputs_for_heap)
-            scores, vectors, indices = _select_top_candidates(last_attn, last_hidden, self.runtime.config.model.top_w)
+            if self._candidate_score_mode() == "attention":
+                last_attn = self._last_attention(outputs_for_heap)
+                scores, vectors, indices = _select_top_candidates(last_attn, last_hidden, self.runtime.config.model.top_w)
+            else:
+                scores, vectors, indices = _select_top_candidates_from_hidden(last_hidden, self.runtime.config.model.top_w)
             head_indices = torch.zeros(scores.size(-1), dtype=torch.long, device=last_hidden.device)
             self.runtime.prime_timestep_zero(
                 layer_index=GLOBAL_HEAP_INDEX,
@@ -291,14 +329,16 @@ class HFoldModelHook:
                     pass
 
         last_hidden = self._extract_last_hidden(outputs_for_heap)
-        last_attn = self._last_attention(outputs_for_heap)
         token_output, transformed_heap = split_appended_outputs(last_hidden, seq_len)
-        if heap_len > 0 and last_attn.dim() == 4:
-            attn_for_originals = last_attn[:, :, heap_len:, heap_len:]
+        if self._candidate_score_mode() == "attention":
+            last_attn = self._last_attention(outputs_for_heap)
+            if heap_len > 0 and last_attn.dim() == 4:
+                attn_for_originals = last_attn[:, :, heap_len:, heap_len:]
+            else:
+                attn_for_originals = last_attn
+            scores, vectors, indices = _select_top_candidates(attn_for_originals, token_output, self.runtime.config.model.top_w)
         else:
-            attn_for_originals = last_attn
-
-        scores, vectors, indices = _select_top_candidates(attn_for_originals, token_output, self.runtime.config.model.top_w)
+            scores, vectors, indices = _select_top_candidates_from_hidden(token_output, self.runtime.config.model.top_w)
         head_indices = torch.zeros(scores.size(-1), dtype=torch.long, device=token_output.device)
         _ = self.runtime.step_with_reinsert_and_fold_tensor(
             layer_index=GLOBAL_HEAP_INDEX,

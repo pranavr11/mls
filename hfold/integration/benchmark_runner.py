@@ -42,6 +42,7 @@ def _run_eval(
     *,
     hfold_window_size: int | None = None,
     hfold_eval_use_kv_cache: bool = True,
+    hfold_eval_chunk_size: int = 1,
 ) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
@@ -75,17 +76,24 @@ def _run_eval(
                 seq_len = int(row_ids.size(1))
                 past_kv = None
                 supports_cache = bool(hfold_eval_use_kv_cache)
-                for next_pos in range(1, seq_len):
+                chunk_size = max(1, int(hfold_eval_chunk_size))
+                next_pos = 1
+                while next_pos < seq_len:
                     out = None
+                    block_pred_tokens = min(chunk_size, seq_len - next_pos)
                     if supports_cache:
-                        # Predict token at `next_pos` from token `next_pos-1` and
-                        # cached context.
-                        step_ids = row_ids[:, next_pos - 1 : next_pos]
+                        # Predict next `block_pred_tokens` from the block of
+                        # preceding inputs and cached context.
+                        input_start = next_pos - 1
+                        input_end = input_start + block_pred_tokens
+                        step_ids = row_ids[:, input_start:input_end]
                         step_mask = None
                         if row_mask is not None:
-                            step_mask = row_mask[:, :next_pos].clone()
+                            # Mask covers cached prefix + current block inputs.
+                            context_end = input_end
+                            step_mask = row_mask[:, :context_end].clone()
                             if hfold_window_size is not None and hfold_window_size > 0:
-                                cutoff = max(0, next_pos - int(hfold_window_size))
+                                cutoff = max(0, context_end - int(hfold_window_size))
                                 if cutoff > 0:
                                     step_mask[:, :cutoff] = 0
                         call_kwargs = {
@@ -111,6 +119,9 @@ def _run_eval(
                             past_kv = None
 
                     if out is None:
+                        # Legacy fallback path: score one token at a time from
+                        # an explicit prefix if cache kwargs are unsupported.
+                        block_pred_tokens = 1
                         start_idx = 0
                         if hfold_window_size is not None and hfold_window_size > 0:
                             start_idx = max(0, next_pos - int(hfold_window_size))
@@ -125,11 +136,16 @@ def _run_eval(
                         batch_nll += float(out.loss.item())
                         batch_pred_tokens += 1
                         break
-                    logits = out.logits[:, -1, :]
-                    target = row_ids[:, next_pos]
-                    token_nll = F.cross_entropy(logits, target, reduction="sum")
+                    logits = out.logits[:, -block_pred_tokens:, :]
+                    target = row_ids[:, next_pos : next_pos + block_pred_tokens]
+                    token_nll = F.cross_entropy(
+                        logits.reshape(-1, logits.size(-1)),
+                        target.reshape(-1),
+                        reduction="sum",
+                    )
                     batch_nll += float(token_nll.item())
-                    batch_pred_tokens += 1
+                    batch_pred_tokens += int(block_pred_tokens)
+                    next_pos += int(block_pred_tokens)
             if batch_pred_tokens > 0:
                 total_loss += batch_nll / batch_pred_tokens
                 total_batches += 1
@@ -290,6 +306,7 @@ def eval_hfold_only(
     device: str = "cpu",
     sliding_window_size: int = 256,
     hfold_eval_use_kv_cache: bool = True,
+    hfold_eval_chunk_size: int = 1,
     embedding_checkpoint_path: str | None = None,
     relevancy_checkpoint_path: str | None = None,
     adapters_checkpoint_path: str | None = None,
@@ -318,6 +335,7 @@ def eval_hfold_only(
         device_obj,
         hfold_window_size=sliding_window_size,
         hfold_eval_use_kv_cache=hfold_eval_use_kv_cache,
+        hfold_eval_chunk_size=hfold_eval_chunk_size,
     )
     return _to_result(mode_label, loss, tok_s)
 
@@ -332,6 +350,7 @@ def benchmark_three_modes(
     device: str = "cpu",
     sliding_window_size: int = 256,
     hfold_eval_use_kv_cache: bool = True,
+    hfold_eval_chunk_size: int = 1,
     full_model_factory: Callable[[], torch.nn.Module] | None = None,
     sliding_model_factory: Callable[[], torch.nn.Module] | None = None,
     embedding_checkpoint_path: str | None = None,
@@ -396,6 +415,7 @@ def benchmark_three_modes(
         device_obj,
         hfold_window_size=sliding_window_size,
         hfold_eval_use_kv_cache=hfold_eval_use_kv_cache,
+        hfold_eval_chunk_size=hfold_eval_chunk_size,
     )
     results.append(_to_result("hfold", hfold_loss, hfold_tok_s))
 

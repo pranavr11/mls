@@ -10,7 +10,8 @@ from ..inference.hfold_runtime import HFoldRuntime
 from ..inference.model_hook import wrap_pythia_with_hfold
 from .checkpoint_utils import load_gpt_neox_causal_lm_from_folder
 from ..models.adapters import BackboneAdapterRegistry
-from ..models.embedding_autoencoder import EmbeddingAutoencoder
+from ..models.embedding_factory import build_embedding_model
+from ..models.interfaces import EmbeddingModelProtocol
 from ..models.relevancy_transformer import RelevancyTransformer
 
 
@@ -19,7 +20,7 @@ class HFoldPythiaBundle:
     model: torch.nn.Module
     tokenizer: AutoTokenizer
     runtime: HFoldRuntime
-    embedding_model: EmbeddingAutoencoder
+    embedding_model: torch.nn.Module | EmbeddingModelProtocol
     relevancy_model: RelevancyTransformer
 
 
@@ -49,7 +50,8 @@ def build_pythia_with_hfold(
     config.model.num_heads = detected_heads
     config.model.validate()
     runtime = HFoldRuntime(config)
-    embedding_model = EmbeddingAutoencoder(
+    embedding_model = build_embedding_model(
+        model_type=config.model.embedding_model_type,
         hidden_size=config.model.adapter_dim,
         latent_size=int(config.model.embedding_latent_dim),
         max_slots=config.model.max_heap_size,
@@ -69,6 +71,7 @@ def build_pythia_with_hfold(
     if embedding_checkpoint_path:
         embedding_model.load_state_dict(
             torch.load(embedding_checkpoint_path, map_location="cpu", weights_only=True),
+            strict=False,
         )
     if relevancy_checkpoint_path:
         relevancy_model.load_state_dict(

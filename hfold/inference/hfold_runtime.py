@@ -38,6 +38,19 @@ class HFoldRuntime:
         self.state = HFoldRuntimeState()
         self._tensor_heaps = {}
 
+    def _is_differentiable_heap(self) -> bool:
+        return bool(getattr(self.config.model, "differentiable_heap", False))
+
+    def _heap_store(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Storage policy for heap vectors:
+        - inference/default: detach to keep runtime semantics and memory bounded.
+        - differentiable mode: keep graph-connected tensors across timesteps.
+        """
+        if self._is_differentiable_heap():
+            return tensor
+        return tensor.detach().clone()
+
     def attach_adapters(self, adapters: BackboneAdapterRegistry, backbone: str) -> None:
         if backbone not in adapters.adapters:
             raise ValueError(f"Adapter for backbone '{backbone}' not registered.")
@@ -127,7 +140,7 @@ class HFoldRuntime:
                 score_dtype=score_dtype,
             )
         vectors = torch.stack(
-            [entry.vector.detach().to(device=vector_device, dtype=vector_dtype) for entry in entries],
+            [entry.vector.to(device=vector_device, dtype=vector_dtype) for entry in entries],
             dim=0,
         )
         return HFoldTensorBundle(
@@ -238,7 +251,7 @@ class HFoldRuntime:
                 ),
                 summary_embedding=None,
             )
-        candidate_vectors = vectors[:limit].detach().clone()
+        candidate_vectors = self._heap_store(vectors[:limit])
         candidate_scores = scores[:limit].to(device=candidate_vectors.device, dtype=scores.dtype)
         candidate_positions = token_positions[:limit].to(device=candidate_vectors.device, dtype=torch.long)
         candidate_heads = head_indices[:limit].to(device=candidate_vectors.device, dtype=torch.long)
@@ -315,7 +328,7 @@ class HFoldRuntime:
         )
         n_popped = min(len(popped_bundle), int(transformed_popped_vectors.size(0)))
         if n_popped > 0:
-            popped_vectors = transformed_popped_vectors[:n_popped].detach().clone()
+            popped_vectors = self._heap_store(transformed_popped_vectors[:n_popped])
             popped_scores = popped_bundle.scores[:n_popped]
             popped_positions = popped_bundle.token_positions[:n_popped]
             popped_heads = popped_bundle.head_indices[:n_popped]
@@ -352,7 +365,7 @@ class HFoldRuntime:
                 keep_mask = ~torch.isin(local_positions_full, popped_positions)
             else:
                 keep_mask = torch.ones_like(local_positions_full, dtype=torch.bool)
-            local_vectors = local_vectors_full[keep_mask].detach().clone()
+            local_vectors = self._heap_store(local_vectors_full[keep_mask])
             local_scores = local_scores_full[keep_mask]
             local_positions = local_positions_full[keep_mask]
             local_heads = local_heads_full[keep_mask]
@@ -496,7 +509,7 @@ class HFoldRuntime:
         updated_raw = heap_vectors_raw + relevancy_scores.unsqueeze(-1) * summary_raw.unsqueeze(1)
         self._tensor_heaps[layer_index] = HFoldTensorBundle(
             scores=heap_bundle.scores,
-            vectors=updated_raw[0].detach().clone(),
+            vectors=self._heap_store(updated_raw[0]),
             token_positions=heap_bundle.token_positions,
             head_indices=heap_bundle.head_indices,
             time_indices=heap_bundle.time_indices,

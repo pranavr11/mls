@@ -1,0 +1,75 @@
+{
+  "args": {
+    "adapter_dim": 256,
+    "adapters_checkpoint": "./checkpoints/aux_quick/adapters.pt",
+    "aux_fold_interval": 1,
+    "backbone": "pythia",
+    "cache_dir": "./data",
+    "checkpoint_dir": "./checkpoints/last3_full_attention_EleutherAI--pythia-14m_sw",
+    "chunk_len": 64,
+    "dataset": "wikitext",
+    "device": "auto",
+    "differentiable_heap": true,
+    "embedding_checkpoint": "./checkpoints/aux_quick/embedding_autoencoder.pt",
+    "embedding_model_type": "autoencoder",
+    "epochs": 1,
+    "eval_batch_size": 1,
+    "grad_clip": 1.0,
+    "last_k_layers": 1,
+    "lr": 5e-06,
+    "max_eval_batches": 1,
+    "max_heap_size": 16,
+    "max_train_batches": 1,
+    "max_unroll_steps": 8,
+    "model_name": "EleutherAI/pythia-14m",
+    "output_dir": "./checkpoints/hfold_ft_smoke",
+    "relevancy_checkpoint": "./checkpoints/aux_quick/relevancy_transformer.pt",
+    "seed": 42,
+    "sliding_window_size": 64,
+    "train_batch_size": 1,
+    "train_scope": "last_k_backbone_plus_aux",
+    "weight_decay": 0.01,
+    "wikitext_config": "wikitext-103-raw-v1"
+  },
+  "hfold_config": {
+    "backbone_adapters": [
+      "pythia",
+      "gpt2"
+    ],
+    "model": {
+      "adapter_dim": 256,
+      "aux_fold_interval": 1,
+      "differentiable_heap": true,
+      "embedding_latent_dim": 128,
+      "embedding_model_type": "autoencoder",
+      "hidden_size": 128,
+      "max_heap_size": 16,
+      "num_heads": 4,
+      "pop_k": 16,
+      "top_w": 16
+    },
+    "pad_token_strategy": "zero",
+    "training": {
+      "batch_size": 1,
+      "cosine_loss_weight": 1.0,
+      "device": "mps",
+      "gradient_clip_norm": 1.0,
+      "learning_rate": 5e-06,
+      "max_steps": null,
+      "mse_loss_weight": 0.25,
+      "num_epochs": 1,
+      "ranking_loss_weight": 0.15,
+      "seed": 42,
+      "weight_decay": 0.01
+    }
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "eval_loss": 8.562454223632812,
+      "eval_ppl": 5231.504712598586,
+      "train_loss": 8.778526306152344,
+      "train_ppl": 6493.300981185297
+    }
+  ]
+}

@@ -11,8 +11,12 @@ class HFoldModelConfig:
     top_w: int = 8
     pop_k: int = 8
     aux_fold_interval: int = 1
+    hfold_step_interval: int = 1
+    differentiable_heap: bool = False
     adapter_dim: int = 256
     embedding_latent_dim: int | None = None
+    embedding_model_type: str = "autoencoder"
+    candidate_score_mode: str = "hidden_dot"
 
     def validate(self) -> None:
         if self.hidden_size <= 0:
@@ -29,6 +33,8 @@ class HFoldModelConfig:
             raise ValueError("pop_k must be >= 0.")
         if self.aux_fold_interval <= 0:
             raise ValueError("aux_fold_interval must be >= 1.")
+        if self.hfold_step_interval <= 0:
+            raise ValueError("hfold_step_interval must be >= 1.")
         # Interpret out-of-range defaults as "use up to heap capacity".
         if self.pop_k > self.max_heap_size:
             self.pop_k = self.max_heap_size
@@ -36,6 +42,10 @@ class HFoldModelConfig:
             self.top_w = 0
         if self.adapter_dim <= 0:
             raise ValueError("adapter_dim must be positive.")
+        if self.embedding_model_type not in {"autoencoder", "mean_identity", "mean_bottleneck"}:
+            raise ValueError("embedding_model_type must be one of: autoencoder, mean_identity, mean_bottleneck.")
+        if self.candidate_score_mode not in {"attention", "hidden_dot"}:
+            raise ValueError("candidate_score_mode must be one of: attention, hidden_dot.")
         # Auto-resolve a true bottleneck by default.
         if self.embedding_latent_dim is None:
             self.embedding_latent_dim = max(1, self.adapter_dim // 2)

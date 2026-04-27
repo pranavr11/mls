@@ -36,6 +36,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--max-heap-size", type=int, default=16)
     parser.add_argument("--adapter-dim", type=int, default=256)
+    parser.add_argument(
+        "--embedding-model-type",
+        choices=["autoencoder", "mean_identity", "mean_bottleneck"],
+        default="autoencoder",
+    )
+    parser.add_argument(
+        "--candidate-score-mode",
+        choices=["attention", "hidden_dot"],
+        default="hidden_dot",
+    )
+    parser.add_argument("--aux-fold-interval", type=int, default=1)
+    parser.add_argument("--hfold-step-interval", type=int, default=1)
+    parser.add_argument(
+        "--hfold-eval-chunk-size",
+        type=int,
+        default=1,
+        help="HFold eval only: number of next-token predictions per forward step.",
+    )
+    parser.add_argument(
+        "--hfold-eval-use-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="HFold eval only: toggle KV-cache path in benchmark runner.",
+    )
     parser.add_argument("--allow-random-aux", action="store_true")
     return parser.parse_args()
 
@@ -124,6 +148,10 @@ def main() -> None:
             top_w=args.max_heap_size,
             pop_k=args.max_heap_size,
             adapter_dim=args.adapter_dim,
+            embedding_model_type=args.embedding_model_type,
+            candidate_score_mode=args.candidate_score_mode,
+            aux_fold_interval=max(1, int(args.aux_fold_interval)),
+            hfold_step_interval=max(1, int(args.hfold_step_interval)),
         ),
         training=HFoldTrainingConfig(),
     )
@@ -135,6 +163,8 @@ def main() -> None:
         dataloader=dataloader,
         config=config,
         device=device,
+        hfold_eval_use_kv_cache=bool(args.hfold_eval_use_kv_cache),
+        hfold_eval_chunk_size=max(1, int(args.hfold_eval_chunk_size)),
         embedding_checkpoint_path=aux["embedding"] if args.aux_dir else None,
         relevancy_checkpoint_path=aux["relevancy"] if args.aux_dir else None,
         adapters_checkpoint_path=aux["adapters"] if args.aux_dir else None,
