@@ -22,6 +22,12 @@ def _move_hfold_bundle_to_device(model: torch.nn.Module, device_obj: torch.devic
         emb.to(device_obj)
     if rel is not None:
         rel.to(device_obj)
+    # Adapters live on HFoldRuntime (not a submodule of the LM); encode/decode runs on heap vectors.
+    runtime = getattr(model, "hfold_runtime", None)
+    if runtime is not None:
+        adapters = getattr(runtime, "_adapters", None)
+        if adapters is not None:
+            adapters.to(device_obj)
 
 
 @dataclass
