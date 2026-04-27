@@ -28,5 +28,5 @@ def test_heap_size_zero_disables_storage():
         head_indices=torch.zeros(4, dtype=torch.long),
         time_index=0,
     )
-    assert len(runtime.state.layers[0].heap) == 0
+    assert len(runtime.export_heap_entries(layer_index=0)) == 0
     assert len(artifacts.evicted_entries) == 0

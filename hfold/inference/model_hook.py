@@ -244,9 +244,9 @@ class HFoldModelHook:
             return outputs_to_return
 
         seq_len = embeds.size(1)
-        popped = self.runtime.pop_top_k(layer_index=GLOBAL_HEAP_INDEX)
-        if popped:
-            heap_vectors = torch.stack([entry.vector for entry in popped], dim=0).unsqueeze(0).to(embeds.device, embeds.dtype)
+        popped_bundle = self.runtime.pop_top_k_tensor(layer_index=GLOBAL_HEAP_INDEX)
+        if len(popped_bundle) > 0:
+            heap_vectors = popped_bundle.vectors.unsqueeze(0).to(embeds.device, embeds.dtype)
         else:
             heap_vectors = embeds.new_zeros((1, 0, embeds.size(-1)))
         heap_len = heap_vectors.size(1)
@@ -300,9 +300,9 @@ class HFoldModelHook:
 
         scores, vectors, indices = _select_top_candidates(attn_for_originals, token_output, self.runtime.config.model.top_w)
         head_indices = torch.zeros(scores.size(-1), dtype=torch.long, device=token_output.device)
-        artifacts = self.runtime.step_with_reinsert_and_fold(
+        _ = self.runtime.step_with_reinsert_and_fold_tensor(
             layer_index=GLOBAL_HEAP_INDEX,
-            popped_entries=popped,
+            popped_bundle=popped_bundle,
             transformed_popped_vectors=transformed_heap[0] if heap_len > 0 else token_output.new_zeros((0, token_output.size(-1))),
             new_vectors=vectors[0],
             new_scores=scores[0],

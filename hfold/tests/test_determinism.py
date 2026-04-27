@@ -17,7 +17,7 @@ def _run_once(seed: int):
         head_indices=torch.zeros(4, dtype=torch.long),
         time_index=0,
     )
-    return [entry.score for entry in runtime.state.layers[0].heap]
+    return [entry.score for entry in runtime.export_heap_entries(layer_index=0)]
 
 
 def test_heap_behavior_deterministic_under_seed():

@@ -26,7 +26,7 @@ def test_timestep_zero_only_inserts():
         time_index=0,
     )
     assert artifacts.popped_entries == []
-    assert len(runtime.state.layers[0].heap) == 2
+    assert len(runtime.export_heap_entries(layer_index=0)) == 2
 
 
 def test_step_reinsert_and_fold_updates_heap_vectors():
@@ -54,6 +54,6 @@ def test_step_reinsert_and_fold_updates_heap_vectors():
         embedding_model=embedding,
         relevancy_model=relevancy,
     )
-    new_heap = [entry.vector for entry in runtime.state.layers[0].heap]
+    new_heap = [entry.vector for entry in runtime.export_heap_entries(layer_index=0)]
     assert len(new_heap) <= runtime.config.model.max_heap_size
     assert artifacts.summary_embedding is not None

@@ -121,6 +121,6 @@ def test_global_hook_uses_adapters_for_aux_models():
     _ = model.gpt_neox(input_ids=input_ids)
     _ = model.gpt_neox(input_ids=input_ids)
 
-    heap = runtime.state.layers[GLOBAL_HEAP_INDEX].heap
+    heap = runtime.export_heap_entries(layer_index=GLOBAL_HEAP_INDEX)
     if heap:
         assert heap[0].vector.shape[-1] == hidden_size  # decoded back to backbone dim

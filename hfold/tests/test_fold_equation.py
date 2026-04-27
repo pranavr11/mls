@@ -53,7 +53,7 @@ def test_fold_matches_h_plus_r_times_g():
     popped = runtime.pop_top_k(layer_index=0)
     heap_before = [
         (entry.token_position, entry.vector.clone())
-        for entry in runtime.state.layers[0].heap
+        for entry in runtime.export_heap_entries(layer_index=0)
     ]
 
     new_vectors = torch.tensor(
@@ -80,7 +80,7 @@ def test_fold_matches_h_plus_r_times_g():
 
     assert artifacts.summary_embedding is not None
     g = artifacts.summary_embedding[0]
-    after = runtime.state.layers[0].heap
+    after = runtime.export_heap_entries(layer_index=0)
     assert len(after) == 2
 
     # The heap is rebuilt by score-sorting; pair each kept entry with the right

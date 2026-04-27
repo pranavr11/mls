@@ -86,5 +86,6 @@ def test_runtime_uses_adapters_for_aux_models():
     )
     assert artifacts.summary_embedding is not None
     assert artifacts.summary_embedding.shape[-1] == adapter_dim
-    assert runtime.state.layers[0].heap, "heap should not be empty"
-    assert runtime.state.layers[0].heap[0].vector.shape[-1] == hidden_size
+    heap = runtime.export_heap_entries(layer_index=0)
+    assert heap, "heap should not be empty"
+    assert heap[0].vector.shape[-1] == hidden_size

@@ -511,7 +511,7 @@ def test_runtime_dedupes_popped_token_positions_from_top_w():
         embedding_model=embed,
         relevancy_model=rel,
     )
-    heap = runtime.state.layers[GLOBAL_HEAP_INDEX].heap
+    heap = runtime.export_heap_entries(layer_index=GLOBAL_HEAP_INDEX)
     positions = [entry.token_position for entry in heap]
     assert popped[0].token_position in positions
     assert positions.count(popped[0].token_position) == 1
