@@ -359,6 +359,9 @@ def wrap_pythia_with_hfold(
     _bind_trunk_forward(trunk, hook)
     # Expose runtime so callers can reset heap state per sequence/batch.
     model.hfold_runtime = runtime
+    # Not registered as child modules; move with backbone via benchmark_runner helpers.
+    model.hfold_embedding_model = embedding_model
+    model.hfold_relevancy_model = relevancy_model
     return model
 
 
@@ -379,4 +382,6 @@ def wrap_gpt2_with_hfold(
     )
     _bind_trunk_forward(trunk, hook)
     model.hfold_runtime = runtime
+    model.hfold_embedding_model = embedding_model
+    model.hfold_relevancy_model = relevancy_model
     return model

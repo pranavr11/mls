@@ -13,6 +13,17 @@ from .gpt2_runner import build_gpt2_with_hfold
 from .pythia_runner import build_pythia_with_hfold
 
 
+def _move_hfold_bundle_to_device(model: torch.nn.Module, device_obj: torch.device) -> None:
+    """Move LM + HFold aux modules (not nn children of the causal LM)."""
+    model.to(device_obj)
+    emb = getattr(model, "hfold_embedding_model", None)
+    rel = getattr(model, "hfold_relevancy_model", None)
+    if emb is not None:
+        emb.to(device_obj)
+    if rel is not None:
+        rel.to(device_obj)
+
+
 @dataclass
 class BenchmarkResult:
     mode: str
@@ -137,6 +148,78 @@ def _apply_sliding_window(model: torch.nn.Module, window_size: int) -> torch.nn.
     return model
 
 
+def _build_hfold_model(
+    *,
+    backbone: str,
+    model_name: str,
+    checkpoint_path: str | None,
+    config: HFoldConfig,
+    embedding_checkpoint_path: str | None = None,
+    relevancy_checkpoint_path: str | None = None,
+    adapters_checkpoint_path: str | None = None,
+) -> torch.nn.Module:
+    aux_kwargs = dict(
+        embedding_checkpoint_path=embedding_checkpoint_path,
+        relevancy_checkpoint_path=relevancy_checkpoint_path,
+        adapters_checkpoint_path=adapters_checkpoint_path,
+    )
+    if backbone == "pythia":
+        return build_pythia_with_hfold(
+            model_name=model_name,
+            checkpoint_path=checkpoint_path,
+            config=config,
+            **aux_kwargs,
+        ).model
+    if backbone == "gpt2":
+        return build_gpt2_with_hfold(
+            model_name=model_name,
+            checkpoint_path=checkpoint_path,
+            config=config,
+            **aux_kwargs,
+        ).model
+    raise ValueError("backbone must be one of: pythia, gpt2")
+
+
+def eval_hfold_only(
+    *,
+    backbone: str,
+    model_name: str,
+    checkpoint_path: str | None,
+    dataloader,
+    config: HFoldConfig,
+    device: str = "cpu",
+    sliding_window_size: int = 256,
+    embedding_checkpoint_path: str | None = None,
+    relevancy_checkpoint_path: str | None = None,
+    adapters_checkpoint_path: str | None = None,
+    mode_label: str = "hfold",
+) -> BenchmarkResult:
+    """
+    Run perplexity eval with HFold hooked inference only (one model load).
+
+    Use this to compare HFold PPL across different checkpoints without paying
+    for full- and sliding-window baselines in the same process.
+    """
+    device_obj = torch.device(device)
+    model = _build_hfold_model(
+        backbone=backbone,
+        model_name=model_name,
+        checkpoint_path=checkpoint_path,
+        config=config,
+        embedding_checkpoint_path=embedding_checkpoint_path,
+        relevancy_checkpoint_path=relevancy_checkpoint_path,
+        adapters_checkpoint_path=adapters_checkpoint_path,
+    )
+    _move_hfold_bundle_to_device(model, device_obj)
+    loss, tok_s = _run_eval(
+        model,
+        dataloader,
+        device_obj,
+        hfold_window_size=sliding_window_size,
+    )
+    return _to_result(mode_label, loss, tok_s)
+
+
 def benchmark_three_modes(
     *,
     backbone: str,
@@ -173,24 +256,15 @@ def benchmark_three_modes(
         return _apply_sliding_window(model, sliding_window_size)
 
     def _build_hfold() -> torch.nn.Module:
-        aux_kwargs = dict(
+        return _build_hfold_model(
+            backbone=backbone,
+            model_name=model_name,
+            checkpoint_path=checkpoint_path,
+            config=config,
             embedding_checkpoint_path=embedding_checkpoint_path,
             relevancy_checkpoint_path=relevancy_checkpoint_path,
             adapters_checkpoint_path=adapters_checkpoint_path,
         )
-        if backbone == "pythia":
-            return build_pythia_with_hfold(
-                model_name=model_name,
-                checkpoint_path=checkpoint_path,
-                config=config,
-                **aux_kwargs,
-            ).model
-        return build_gpt2_with_hfold(
-            model_name=model_name,
-            checkpoint_path=checkpoint_path,
-            config=config,
-            **aux_kwargs,
-        ).model
 
     full_model = (full_model_factory or _default_full_factory)().to(device_obj)
     full_loss, full_tok_s = _run_eval(full_model, dataloader, device_obj)
@@ -200,7 +274,8 @@ def benchmark_three_modes(
     sliding_loss, sliding_tok_s = _run_eval(sliding_model, dataloader, device_obj)
     results.append(_to_result("sliding_window", sliding_loss, sliding_tok_s))
 
-    hfold_model = _build_hfold().to(device_obj)
+    hfold_model = _build_hfold()
+    _move_hfold_bundle_to_device(hfold_model, device_obj)
     hfold_loss, hfold_tok_s = _run_eval(
         hfold_model,
         dataloader,
