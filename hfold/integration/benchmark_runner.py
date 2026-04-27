@@ -310,8 +310,14 @@ def benchmark_three_modes(
         if checkpoint_path and backbone == "pythia":
             return load_gpt_neox_causal_lm_from_folder(checkpoint_path, cache_dir="./data")
         if checkpoint_path:
-            return AutoModelForCausalLM.from_pretrained(checkpoint_path)
-        return AutoModelForCausalLM.from_pretrained(model_name)
+            return AutoModelForCausalLM.from_pretrained(
+                checkpoint_path,
+                attn_implementation="eager",
+            )
+        return AutoModelForCausalLM.from_pretrained(
+            model_name,
+            attn_implementation="eager",
+        )
 
     def _default_sliding_factory() -> torch.nn.Module:
         model = (full_model_factory or _default_full_factory)()

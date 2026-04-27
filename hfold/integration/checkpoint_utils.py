@@ -47,6 +47,10 @@ def load_gpt_neox_causal_lm_from_folder(
     """
     cp = Path(checkpoint_path)
     config = AutoConfig.from_pretrained(str(cp), cache_dir=cache_dir)
+    # Be explicit so behavior is stable across Transformers versions.
+    setattr(config, "_attn_implementation", "eager")
+    if hasattr(config, "attn_implementation"):
+        setattr(config, "attn_implementation", "eager")
     model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
     sd = _load_raw_state_dict(cp)
     if sd is None:
