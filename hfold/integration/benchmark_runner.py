@@ -58,6 +58,11 @@ def _run_eval(
             # HFold semantics are autoregressive and timestep-based. For runtime
             # eval we score next-token NLL one step at a time so heap evolution
             # actually executes across timesteps.
+            #
+            # Fast path: if the model supports KV cache, feed one token per step
+            # with `past_key_values` to avoid repeatedly re-encoding prefixes.
+            # Fallback path: for tiny test stubs that do not accept cache kwargs,
+            # preserve the legacy bounded-prefix behavior.
             input_ids = batch["input_ids"]
             attention_mask = batch.get("attention_mask")
             batch_nll = 0.0
@@ -67,23 +72,60 @@ def _run_eval(
                 row_ids = input_ids[row : row + 1]
                 row_mask = None if attention_mask is None else attention_mask[row : row + 1]
                 seq_len = int(row_ids.size(1))
-                for t in range(1, seq_len):
-                    start_idx = 0
-                    if hfold_window_size is not None and hfold_window_size > 0:
-                        start_idx = max(0, t - int(hfold_window_size))
-                    prefix_ids = row_ids[:, start_idx:t]
-                    prefix_mask = None if row_mask is None else row_mask[:, start_idx:t]
-                    out = model(
-                        input_ids=prefix_ids,
-                        attention_mask=prefix_mask,
-                    )
+                past_kv = None
+                supports_cache = True
+                for next_pos in range(1, seq_len):
+                    out = None
+                    if supports_cache:
+                        # Predict token at `next_pos` from token `next_pos-1` and
+                        # cached context.
+                        step_ids = row_ids[:, next_pos - 1 : next_pos]
+                        step_mask = None
+                        if row_mask is not None:
+                            step_mask = row_mask[:, :next_pos].clone()
+                            if hfold_window_size is not None and hfold_window_size > 0:
+                                cutoff = max(0, next_pos - int(hfold_window_size))
+                                if cutoff > 0:
+                                    step_mask[:, :cutoff] = 0
+                        call_kwargs = {
+                            "input_ids": step_ids,
+                            "attention_mask": step_mask,
+                            "use_cache": True,
+                        }
+                        if past_kv is not None:
+                            call_kwargs["past_key_values"] = past_kv
+                        try:
+                            out = model(**call_kwargs)
+                            if hasattr(out, "past_key_values"):
+                                past_kv = out.past_key_values
+                            elif hasattr(out, "past_key_value"):
+                                past_kv = out.past_key_value
+                            else:
+                                past_kv = None
+                        except TypeError:
+                            # Minimal unit-test doubles may not accept
+                            # use_cache/past_key_values. Fall back to legacy
+                            # bounded-prefix execution.
+                            supports_cache = False
+                            past_kv = None
+
+                    if out is None:
+                        start_idx = 0
+                        if hfold_window_size is not None and hfold_window_size > 0:
+                            start_idx = max(0, next_pos - int(hfold_window_size))
+                        prefix_ids = row_ids[:, start_idx:next_pos]
+                        prefix_mask = None if row_mask is None else row_mask[:, start_idx:next_pos]
+                        out = model(
+                            input_ids=prefix_ids,
+                            attention_mask=prefix_mask,
+                        )
                     if not hasattr(out, "logits"):
                         # Fallback for tiny unit-test stubs that only emit loss.
                         batch_nll += float(out.loss.item())
                         batch_pred_tokens += 1
                         break
                     logits = out.logits[:, -1, :]
-                    target = row_ids[:, t]
+                    target = row_ids[:, next_pos]
                     token_nll = F.cross_entropy(logits, target, reduction="sum")
                     batch_nll += float(token_nll.item())
                     batch_pred_tokens += 1
