@@ -40,7 +40,9 @@ def build_pythia_with_hfold(
     if checkpoint_path:
         model = load_gpt_neox_causal_lm_from_folder(checkpoint_path, cache_dir=cache_dir)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=cache_dir)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, cache_dir=cache_dir, attn_implementation="eager"
+        )
     detected_hidden = int(model.config.hidden_size)
     detected_heads = int(getattr(model.config, "num_attention_heads", config.model.num_heads))
     config.model.hidden_size = detected_hidden

@@ -47,10 +47,12 @@ def load_gpt_neox_causal_lm_from_folder(
     """
     cp = Path(checkpoint_path)
     config = AutoConfig.from_pretrained(str(cp), cache_dir=cache_dir)
-    model = AutoModelForCausalLM.from_config(config)
+    model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
     sd = _load_raw_state_dict(cp)
     if sd is None:
-        return AutoModelForCausalLM.from_pretrained(str(cp), cache_dir=cache_dir)
+        return AutoModelForCausalLM.from_pretrained(
+            str(cp), cache_dir=cache_dir, attn_implementation="eager"
+        )
     if any(".attention.original_attention." in k for k in sd):
         sd = remap_gpt_neox_sliding_wrapper_state_dict(sd)
     model.load_state_dict(sd, strict=False)
