@@ -120,20 +120,38 @@ class _SlidingWindowMaskWrapper(torch.nn.Module):
         self.window_size = window_size
 
     def forward(self, hidden_states, *args, **kwargs):
-        if "attention_mask" in kwargs and kwargs["attention_mask"] is not None:
-            mask = kwargs["attention_mask"]
-            if mask.dim() == 4:
-                tgt_len = mask.shape[-2]
-                src_len = mask.shape[-1]
-                idx_tgt = torch.arange(src_len - tgt_len, src_len, device=mask.device).unsqueeze(1)
-                idx_src = torch.arange(src_len, device=mask.device).unsqueeze(0)
-                out_of_window = (idx_tgt - idx_src) >= self.window_size
-                modified = mask.clone()
-                if modified.dtype == torch.bool:
-                    modified = modified.masked_fill(out_of_window, False)
-                else:
-                    min_val = torch.finfo(modified.dtype).min
-                    modified = modified.masked_fill(out_of_window, min_val)
+        if self.window_size <= 0:
+            return self.original_attention(hidden_states, *args, **kwargs)
+
+        # GPT-NeoX attention often receives the 4D mask as a positional arg.
+        # If we only inspect kwargs, sliding-window becomes a no-op.
+        mask = kwargs.get("attention_mask")
+        mask_pos = None
+        if mask is None and args:
+            for i, candidate in enumerate(args):
+                if torch.is_tensor(candidate) and candidate.dim() == 4:
+                    mask = candidate
+                    mask_pos = i
+                    break
+
+        if torch.is_tensor(mask) and mask.dim() == 4:
+            tgt_len = mask.shape[-2]
+            src_len = mask.shape[-1]
+            idx_tgt = torch.arange(src_len - tgt_len, src_len, device=mask.device).unsqueeze(1)
+            idx_src = torch.arange(src_len, device=mask.device).unsqueeze(0)
+            out_of_window = (idx_tgt - idx_src) >= self.window_size
+            modified = mask.clone()
+            if modified.dtype == torch.bool:
+                modified = modified.masked_fill(out_of_window, False)
+            else:
+                min_val = torch.finfo(modified.dtype).min
+                modified = modified.masked_fill(out_of_window, min_val)
+
+            if mask_pos is not None:
+                args = list(args)
+                args[mask_pos] = modified
+                args = tuple(args)
+            else:
                 kwargs["attention_mask"] = modified
         return self.original_attention(hidden_states, *args, **kwargs)
 
